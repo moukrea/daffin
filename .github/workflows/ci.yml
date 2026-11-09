@@ -1,0 +1,621 @@
+name: CI
+# Tests one commit of daffin's private source (moukrea/daffin-src), dispatched by hand, once per merge train:
+#   gh workflow run ci.yml --repo moukrea/daffin -f sha=<commit> -f label=<train>
+#   gh run list --repo moukrea/daffin --workflow ci.yml --json displayTitle,conclusion,url
+# It reads the source with two read-only deploy keys: DAFFIN_SRC_READ_KEY (moukrea/daffin-src) and JAUNT_SRC_READ_KEY
+# (moukrea/jaunt-src: the nebul crates Cargo fetches by git). This repository is public, and so are its logs: the
+# source never leaves the runner. No artifact; nothing of the source cached (only crates.io's crates, npm's and
+# Gradle's packages, and tools: never ~/.cargo/git, never a target folder, which a pull request's workflow could read
+# back); compiler diagnostics in short form (where and what, never the source line); the jaunt-src key forgotten once
+# the dependencies are fetched, before anything is installed or built. scripts/check-public.mjs (daffin-src) holds this
+# file to that. It lives in daffin-src as ops/public/.github/workflows/ci.yml and is published from there.
+run-name: CI ${{ inputs.label || 'train' }} ${{ inputs.sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'daffin-src commit to test (40 lowercase hexadecimal characters)'
+        required: true
+        type: string
+      label:
+        description: 'What the run tests (a merge train, a branch), for its title'
+        required: false
+        default: ''
+        type: string
+permissions: {}
+concurrency:
+  group: ci-${{ inputs.sha }}
+  cancel-in-progress: false
+env:
+  # The toolchain the source is checked with on fedora1 and on Windows: a newer one on the runner does not turn clippy red.
+  RUSTUP_TOOLCHAIN: '1.91.1'
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  # No debug info in test builds: half the disk and less time; a failing test still names its file and line.
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  # Cargo fetches the nebul crates with git itself, so that the key below is the one used.
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+  NODE_VERSION: '24.11.0'
+  TAURI_CLI_VERSION: '2.12.1'
+  NDK_VERSION: '27.3.13750724'
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 2
+    steps:
+      - name: Require an exact source commit
+        env:
+          SHA: ${{ inputs.sha }}
+          LABEL: ${{ inputs.label }}
+        run: |
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full commit id (40 lowercase hexadecimal characters)"; exit 1; }
+          [[ "$LABEL" =~ ^[A-Za-z0-9._/#:+-]{0,64}$ ]] || { echo "::error::label: letters, digits and ._/#:+- only, 64 at most"; exit 1; }
+
+  # Node's tests, « Licences » against Cargo.lock, what may go public, the catalogue server, the crates' licences.
+  checks:
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-registry-
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          key="$RUNNER_TEMP/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          # GitHub's own host key (GET https://api.github.com/meta, ssh_keys).
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          cargo fetch --locked
+          (cd apps/daffin/src-tauri && cargo fetch --locked)
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: always()
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Node's tests (the app's page, scripts/)
+        run: node --test apps/daffin/tests/*.test.mjs scripts/*.test.mjs
+      - name: « Licences » against Cargo.lock
+        run: node apps/daffin/scripts/licences.mjs check
+      - name: What may go public (ops/public, ops/pages), and the fonts of the page the app embeds
+        run: |
+          node scripts/check-public.mjs source
+          node scripts/check-public.mjs fonts apps/daffin/ui
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('server/package-lock.json') }}
+          restore-keys: npm-
+      - name: The catalogue server (vitest, tsc)
+        working-directory: server
+        # vitest's code frames (the test's source around a failure: lines `  12| …`, `   | ^`) are left out of the log.
+        run: |
+          set -o pipefail
+          npm ci --no-audit --no-fund
+          npx vitest run 2>&1 | sed -E '/^[[:space:]]*[0-9]*[[:space:]]*\|/d'
+          npx tsc --noEmit --pretty false -p .
+      - name: The crates' licences (cargo-deny, deny.toml)
+        run: |
+          set -euo pipefail
+          url=https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          curl -fsSL "$url" -o "$RUNNER_TEMP/deny.tgz"
+          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  $RUNNER_TEMP/deny.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/deny.tgz" -C "$RUNNER_TEMP" --strip-components=1
+          "$RUNNER_TEMP/cargo-deny" --manifest-path Cargo.toml --config deny.toml --offline --locked check licenses bans
+          "$RUNNER_TEMP/cargo-deny" --manifest-path apps/daffin/src-tauri/Cargo.toml --config deny.toml --offline --locked check licenses bans
+
+  # The host's workspace (the host, its libraries, the stream agent): its tests and clippy, every feature.
+  workspace:
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-registry-
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          key="$RUNNER_TEMP/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          cargo fetch --locked
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - name: Room on the disk (the runner's .NET and Haskell)
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup && df -h / | tail -1
+      - name: Tests (every feature)
+        run: cargo test --locked --workspace --all-features --no-fail-fast --message-format=short
+      - name: Clippy (every target and feature, warnings denied)
+        if: always()
+        run: cargo clippy --locked --workspace --all-targets --all-features --message-format=short -- -D warnings
+
+  # The app's crate (apps/daffin/src-tauri, a workspace of its own) on Linux: its tests and clippy.
+  app:
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-registry-
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          key="$RUNNER_TEMP/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          (cd apps/daffin/src-tauri && cargo fetch --locked)
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - name: Room on the disk (the runner's .NET and Haskell)
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup && df -h / | tail -1
+      - name: WebKitGTK, GTK and libsoup (development files)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - name: Tests
+        working-directory: apps/daffin/src-tauri
+        run: cargo test --locked --no-fail-fast --message-format=short
+      - name: Clippy (every target, warnings denied)
+        if: always()
+        working-directory: apps/daffin/src-tauri
+        run: cargo clippy --locked --all-targets --message-format=short -- -D warnings
+
+  # The Android app as released (aarch64, release profile), unsigned: the release key stays on fedora1 and Home. Its
+  # fonts checked as the release checks them; the APK itself stays here.
+  android-release:
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-registry-
+      - name: Rust toolchain (aarch64 Android)
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" aarch64-linux-android
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          key="$RUNNER_TEMP/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          (cd apps/daffin/src-tauri && cargo fetch --locked)
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - id: tauri-cli
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      - name: Tauri's CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: CARGO_NET_OFFLINE=false cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION"
+      # Saved at once, so that a later failure does not lose it (the other Android job may save it first: no harm).
+      - if: steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      - id: gradle
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper/dists
+          key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: The APK (aarch64, release, unsigned)
+        working-directory: apps/daffin
+        run: |
+          set -euo pipefail
+          export JAVA_HOME="$JAVA_HOME_21_X64" ANDROID_HOME="$ANDROID_SDK_ROOT"
+          [ -d "$ANDROID_HOME/ndk/$NDK_VERSION" ] || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          export NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
+          # The build's own output names source lines (rustc's and Kotlin's): it stays in a file, and the log gets the
+          # diagnostics' first lines and locations, Gradle's verdict, nothing else.
+          apk_log_errors() { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[ew]: |^FAILURE: |^BUILD (SUCCESSFUL|FAILED)|^\* What went wrong|^> |Finished' "$RUNNER_TEMP/apk.log" | head -200 || true; }
+          export GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.configuration-cache=false"
+          cargo tauri android build --apk --ci --target aarch64 > "$RUNNER_TEMP/apk.log" 2>&1 || { apk_log_errors; exit 1; }
+          apk_log_errors | tail -5
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk/universal/release -name "*.apk" | sort | head -1)
+          [ -n "$apk" ] || { echo "::error::no APK"; exit 1; }
+          echo "built $apk: $(stat -c %s "$apk") bytes"
+          echo "APK_PATH=$PWD/$apk" >> "$GITHUB_ENV"
+      - if: steps.gradle.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper/dists
+          key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+      - name: « Licences » lists the Android libraries this build resolved
+        run: |
+          export JAVA_HOME="$JAVA_HOME_21_X64" ANDROID_HOME="$ANDROID_SDK_ROOT"
+          if ! node apps/daffin/scripts/android-licences.mjs check; then
+            # What differs: the libraries' names, versions and licences (the list every APK ships), nothing else.
+            node apps/daffin/scripts/android-licences.mjs write > /dev/null
+            git diff --stat -- apps/daffin/ui/js/licences-android.js
+            git diff --unified=0 -- apps/daffin/ui/js/licences-android.js | grep -E '^[-+][[:space:]]*"(id|version|licence)"' | head -80 || true
+            exit 1
+          fi
+      - name: The APK's fonts (scripts/check-public.mjs)
+        run: |
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            import { apkFontErrors } from './scripts/check-public.mjs';
+            const errors = apkFontErrors('the APK', readFileSync(process.env.APK_PATH));
+            if (errors.length) { console.error(errors.join('\n')); process.exit(1); }
+            console.log('the APK holds no font but the allowed one');
+          "
+
+  # The app on an Android emulator (x86_64, debug build, KVM, AOSP image): it installs, starts, stays up with its page, without a
+  # crash or an « isn't responding » dialog.
+  android-emulator:
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-registry-
+      - name: Rust toolchain (x86_64 Android)
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" x86_64-linux-android
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          key="$RUNNER_TEMP/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          (cd apps/daffin/src-tauri && cargo fetch --locked)
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - id: tauri-cli
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      - name: Tauri's CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: CARGO_NET_OFFLINE=false cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION"
+      # Saved at once, so that a later failure does not lose it (the other Android job may save it first: no harm).
+      - if: steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      - id: gradle
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper/dists
+          key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+      - name: The APK (x86_64, debug)
+        working-directory: apps/daffin
+        run: |
+          set -euo pipefail
+          export JAVA_HOME="$JAVA_HOME_21_X64" ANDROID_HOME="$ANDROID_SDK_ROOT"
+          [ -d "$ANDROID_HOME/ndk/$NDK_VERSION" ] || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          export NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
+          # The build's own output names source lines (rustc's and Kotlin's): it stays in a file, and the log gets the
+          # diagnostics' first lines and locations, Gradle's verdict, nothing else.
+          apk_log_errors() { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[ew]: |^FAILURE: |^BUILD (SUCCESSFUL|FAILED)|^\* What went wrong|^> |Finished' "$RUNNER_TEMP/apk.log" | head -200 || true; }
+          export GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.configuration-cache=false"
+          cargo tauri android build --debug --apk --ci --target x86_64 > "$RUNNER_TEMP/apk.log" 2>&1 || { apk_log_errors; exit 1; }
+          apk_log_errors | tail -5
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk/universal/debug -name "*.apk" | sort | head -1)
+          [ -n "$apk" ] || { echo "::error::no APK"; exit 1; }
+          echo "built $apk: $(stat -c %s "$apk") bytes"
+          echo "APK_PATH=$PWD/$apk" >> "$GITHUB_ENV"
+      - if: steps.gradle.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper/dists
+          key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+      - id: system-image
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /usr/local/lib/android/sdk/system-images/android-34/default/x86_64
+          key: android-system-image-34-default-x86_64
+      - name: KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # AOSP's image, without Google's services: on the runner's CPU they die now and then (SIGILL), and Android then
+      # kills every app that uses their fonts provider, the WebView's included. Nothing of daffin needs them.
+      - name: The emulator (Android 14, x86_64)
+        run: |
+          set -euo pipefail
+          sdk="$ANDROID_SDK_ROOT"
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          # One folder for the AVD, which avdmanager writes and the emulator reads (their defaults differ).
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          # `yes` ends on a broken pipe when sdkmanager stops reading: not a failure. The tools' own output goes to
+          # files, shown when something fails.
+          { yes || true; } | "$sdk/cmdline-tools/latest/bin/sdkmanager" --install emulator platform-tools "platforms;android-34" "system-images;android-34;default;x86_64" > "$RUNNER_TEMP/sdkmanager.log" 2>&1 ||
+            { tail -30 "$RUNNER_TEMP/sdkmanager.log"; echo "::error::sdkmanager failed"; exit 1; }
+          echo no | "$sdk/cmdline-tools/latest/bin/avdmanager" create avd -n ci -k "system-images;android-34;default;x86_64" -d pixel_6 > "$RUNNER_TEMP/avdmanager.log" 2>&1 ||
+            { tail -30 "$RUNNER_TEMP/avdmanager.log"; echo "::error::avdmanager failed"; exit 1; }
+          "$sdk/emulator/emulator" -list-avds
+          nohup "$sdk/emulator/emulator" -avd ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 4096 -accel on > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          emulator=$!
+          adb="$sdk/platform-tools/adb"
+          booted=0
+          for _ in $(seq 1 120); do
+            kill -0 "$emulator" 2>/dev/null || { tail -40 "$RUNNER_TEMP/emulator.log"; echo "::error::the emulator stopped"; exit 1; }
+            [ "$(timeout 10 "$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && { booted=1; break; }
+            sleep 5
+          done
+          [ "$booted" = 1 ] || { tail -40 "$RUNNER_TEMP/emulator.log"; echo "::error::the emulator did not boot in 10 minutes"; exit 1; }
+          "$adb" shell settings put global window_animation_scale 0
+          "$adb" shell settings put global transition_animation_scale 0
+          "$adb" shell settings put global animator_duration_scale 0
+          echo "booted: Android $("$adb" shell getprop ro.build.version.release | tr -d '\r'), after ${SECONDS}s"
+          echo "ABIs: $("$adb" shell getprop ro.product.cpu.abilist | tr -d '\r')"
+          echo "WebView: $("$adb" shell dumpsys webviewupdate | grep -m1 'Current WebView package' | tr -d '\r' | sed 's/^ *//')"
+      - if: steps.system-image.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: /usr/local/lib/android/sdk/system-images/android-34/default/x86_64
+          key: android-system-image-34-default-x86_64
+      - name: The app installs, starts and stays up
+        run: |
+          set -euo pipefail
+          adb="$ANDROID_SDK_ROOT/platform-tools/adb"
+          timeout 300 "$adb" install -r "$APK_PATH"
+          "$adb" logcat -c
+          timeout 120 "$adb" shell am start -W -n one.daffin.app/.MainActivity
+          sleep 45
+          pid=$("$adb" shell pidof one.daffin.app | tr -d '\r' || true)
+          resumed=$("$adb" shell dumpsys activity activities | grep -m1 -E "topResumedActivity|mResumedActivity" | tr -d '\r' || true)
+          echo "pid: ${pid:-none}; resumed: $resumed"
+          "$adb" logcat -d > "$RUNNER_TEMP/logcat.log" || true
+          "$adb" logcat -d -b crash >> "$RUNNER_TEMP/logcat.log" || true
+          # daffin's own crashes and « isn't responding » only: a Java exception, a native signal, an ANR.
+          grep -E "Process: one\.daffin\.app|pid [0-9]+ \(one\.daffin\.app\)|ANR in one\.daffin\.app" "$RUNNER_TEMP/logcat.log" > "$RUNNER_TEMP/fatal.log" || true
+          fail=0
+          [ -n "$pid" ] || { echo "::error::the app is not running"; fail=1; }
+          echo "$resumed" | grep -q "one.daffin.app/" || { echo "::error::the app is not the resumed activity"; fail=1; }
+          if [ -s "$RUNNER_TEMP/fatal.log" ]; then echo "::error::a crash or an ANR"; head -20 "$RUNNER_TEMP/fatal.log"; fail=1; fi
+          if [ "$fail" = 1 ]; then
+            # What Android and the app logged about it: messages, never source.
+            grep -E "one\.daffin\.app|RustStdoutStderr|AndroidRuntime|Tauri" "$RUNNER_TEMP/logcat.log" | grep -v "AppsFilter" | tail -60 || true
+          fi
+          exit $fail
+
+  # Windows (MSVC): the host's workspace and the app's crate, clippy and tests, and the host and the stream agent built as
+  # they ship (kept nowhere: no artifact). Every step runs even after one fails, so that one run says all that breaks.
+  windows:
+    needs: guard
+    runs-on: windows-2025
+    permissions: {}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The files as Linux has them (the tests' fixtures and include_str!s), not converted to CRLF by Git for Windows.
+      - name: Line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - id: registry
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: windows-cargo-registry-
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
+      - id: deps
+        name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          # Unix-style paths: Git's sh reads GIT_SSH_COMMAND, where a Windows path's backslashes would be escapes.
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          key="$tmp/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$tmp/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          cargo fetch --locked
+          (cd apps/daffin/src-tauri && cargo fetch --locked)
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - if: steps.registry.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+      - name: "Clippy: the workspace (every target and feature, warnings denied)"
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: cargo clippy --locked --workspace --all-features --all-targets --message-format=short -- -D warnings
+      - name: "Tests: the workspace"
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: cargo test --locked --workspace --no-fail-fast --message-format=short
+      - name: The host and the stream agent, as released
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: cargo build --locked --release -p daffin-host -p daffin-stream-agent --message-format=short
+      - name: "Clippy: the app's crate (every target, warnings denied)"
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        working-directory: apps/daffin/src-tauri
+        run: cargo clippy --locked --all-targets --message-format=short -- -D warnings
+      - name: "Tests: the app's crate"
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        working-directory: apps/daffin/src-tauri
+        run: cargo test --locked --no-fail-fast --message-format=short
+
+  # The built-in player's tools (apps/daffin/player/tools): their tests. The ones that need the cores built (emcc)
+  # or Playwright skip themselves.
+  player-tools:
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: pytest
+        working-directory: apps/daffin/player
+        run: |
+          python -m pip install --quiet 'pytest==8.4.2'
+          python -m pytest -q --tb=line tools/
+
+  # One line per job: what the train reads (gh run view --repo moukrea/daffin <run>).
+  summary:
+    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 2
+    steps:
+      - name: Results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          {
+            echo "### daffin-src ${SHA:0:12}"
+            echo
+            echo "| Job | Result |"
+            echo "|---|---|"
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<< "$NEEDS"
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+          [ "$(jq '[.[] | select(.result != "success")] | length' <<< "$NEEDS")" = 0 ]
