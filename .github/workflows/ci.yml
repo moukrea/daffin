@@ -574,6 +574,105 @@ jobs:
         working-directory: apps/daffin/src-tauri
         run: cargo test --locked --no-fail-fast --message-format=short
 
+  # The Windows installer (NSIS) as `cargo tauri build` makes it, kept nowhere: it must carry THIRD-PARTY-LICENSES, the
+  # notices of this Cargo.lock for Windows (licences.mjs installer), never the placeholder build.rs writes for cargo.
+  windows-installer:
+    needs: guard
+    runs-on: windows-2025
+    permissions: {}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: windows-cargo-registry-
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          key="$tmp/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$tmp/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          (cd apps/daffin/src-tauri && cargo fetch --locked)
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - id: tauri-cli
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      - name: Tauri's CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: CARGO_NET_OFFLINE=false cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION"
+      - if: steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      # licences.mjs bundle (the beforeBundleCommand) runs the licence gate first.
+      - name: cargo-deny
+        run: |
+          set -euo pipefail
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          url=https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-pc-windows-msvc.tar.gz
+          curl -fsSL "$url" -o "$tmp/deny.tgz"
+          echo "975a22143262fd27476d19ee00c7af67978426e40e1dee94eed6bbade1cf87dc  $tmp/deny.tgz" | sha256sum -c -
+          mkdir -p "$tmp/deny"
+          tar -xzf "$tmp/deny.tgz" -C "$tmp/deny" --strip-components=1
+          cp "$tmp/deny/cargo-deny.exe" ~/.cargo/bin/
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: The installer (NSIS)
+        working-directory: apps/daffin
+        run: |
+          set -euo pipefail
+          # The build's own output names source lines (rustc's): it stays in a file, and the log gets the diagnostics'
+          # first lines and locations, the CLI's steps and the licences script's lines, nothing else.
+          bundle_log() { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[[:space:]]*(Error|Warn|Info|Running|Finished|Bundling) |^licences: |^check-public: ' "$RUNNER_TEMP/bundle.log" | head -200 || true; }
+          cargo tauri build --bundles nsis --ci > "$RUNNER_TEMP/bundle.log" 2>&1 || { bundle_log; exit 1; }
+          bundle_log | tail -8
+          exe=$(find src-tauri/target/release/bundle/nsis -name "*-setup.exe" | sort | head -1)
+          [ -n "$exe" ] || { echo "::error::no installer"; exit 1; }
+          echo "built $exe: $(stat -c %s "$exe") bytes"
+          echo "INSTALLER=$PWD/$exe" >> "$GITHUB_ENV"
+      - name: The installer carries the notices, never the placeholder
+        run: node apps/daffin/scripts/licences.mjs installer "$INSTALLER"
+      # The refusal itself, on a real installer: as if bundle had not run, build.rs's placeholder in place of the notices,
+      # the same build bundled again without the beforeBundleCommand.
+      - name: An installer that carries the placeholder is refused
+        working-directory: apps/daffin
+        run: |
+          set -euo pipefail
+          node --input-type=module -e "import { writeFileSync } from 'node:fs'; import { NOTICES_PLACEHOLDER } from './scripts/licences.mjs'; writeFileSync('src-tauri/target/licences/THIRD-PARTY-LICENSES', NOTICES_PLACEHOLDER + '\n');"
+          cargo tauri bundle --bundles nsis --ci --config '{"build":{"beforeBundleCommand":null}}' > "$RUNNER_TEMP/placeholder.log" 2>&1 ||
+            { grep -E '^[[:space:]]*(Error|Warn) ' "$RUNNER_TEMP/placeholder.log" | head -20 || true; exit 1; }
+          if node scripts/licences.mjs installer "$INSTALLER"; then echo "::error::an installer carrying the placeholder passed"; exit 1; fi
+          echo "refused, as it must be"
+
   # The built-in player's tools (apps/daffin/player/tools): their tests. The ones that need the cores built (emcc)
   # or Playwright skip themselves.
   player-tools:
@@ -599,7 +698,7 @@ jobs:
 
   # One line per job: what the train reads (gh run view --repo moukrea/daffin <run>).
   summary:
-    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows]
+    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows, windows-installer]
     if: always()
     runs-on: ubuntu-24.04
     permissions: {}
