@@ -104,11 +104,16 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
       - name: Node's tests (the app's page, scripts/)
-        run: node --test apps/daffin/tests/*.test.mjs scripts/*.test.mjs
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          node --test apps/daffin/tests/*.test.mjs scripts/*.test.mjs
       - name: « Licences » against Cargo.lock
-        run: node apps/daffin/scripts/licences.mjs check
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          node apps/daffin/scripts/licences.mjs check
       - name: What may go public (ops/public, ops/pages), and the fonts of the page the app embeds
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           node scripts/check-public.mjs source
           node scripts/check-public.mjs fonts apps/daffin/ui
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -120,6 +125,7 @@ jobs:
         working-directory: server
         # vitest's code frames (the test's source around a failure: lines `  12| …`, `   | ^`) are left out of the log.
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -o pipefail
           npm ci --no-audit --no-fund
           npx vitest run 2>&1 | sed -E '/^[[:space:]]*[0-9]*[[:space:]]*\|/d'
@@ -321,6 +327,7 @@ jobs:
           key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
       - name: « Licences » lists the Android libraries this build resolved
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           export JAVA_HOME="$JAVA_HOME_21_X64" ANDROID_HOME="$ANDROID_SDK_ROOT"
           if ! node apps/daffin/scripts/android-licences.mjs check; then
             # What differs: the libraries' names, versions and licences (the list every APK ships), nothing else.
@@ -331,6 +338,7 @@ jobs:
           fi
       - name: The APK's fonts (scripts/check-public.mjs)
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           node --input-type=module -e "
             import { readFileSync } from 'node:fs';
             import { apkFontErrors } from './scripts/check-public.mjs';
@@ -508,6 +516,7 @@ jobs:
       # « Installer », Android's « Update », then the newer one installed. It prints its verdicts only.
       - name: The update, as a phone gets it
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
           script=apps/daffin/scripts/ci-device-checks.sh
           [ -f "$script" ] || { echo "no update check in this commit"; exit 0; }
@@ -678,12 +687,15 @@ jobs:
           echo "built $exe: $(stat -c %s "$exe") bytes"
           echo "INSTALLER=$PWD/$exe" >> "$GITHUB_ENV"
       - name: The installer carries the notices, never the placeholder
-        run: node apps/daffin/scripts/licences.mjs installer "$INSTALLER"
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          node apps/daffin/scripts/licences.mjs installer "$INSTALLER"
       # The refusal itself, on a real installer: as if bundle had not run, build.rs's placeholder in place of the notices,
       # the same build bundled again without the beforeBundleCommand.
       - name: An installer that carries the placeholder is refused
         working-directory: apps/daffin
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
           node --input-type=module -e "import { writeFileSync } from 'node:fs'; import { NOTICES_PLACEHOLDER } from './scripts/licences.mjs'; writeFileSync('src-tauri/target/licences/THIRD-PARTY-LICENSES', NOTICES_PLACEHOLDER + '\n');"
           cargo tauri bundle --bundles nsis --ci --config '{"build":{"beforeBundleCommand":null}}' > "$RUNNER_TEMP/placeholder.log" 2>&1 ||
@@ -723,8 +735,13 @@ jobs:
         env:
           DAFFIN_BENCH_REQUIRED: '1'
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           if [ ! -f apps/daffin/scripts/office-bench/bench.py ]; then echo "no office bench in this commit"; exit 0; fi
           python3 apps/daffin/scripts/office-bench/bench.py check
+          # The same with a symmetric office NAT (a phone on a carrier network), where the bench has the option.
+          if grep -q -- '--office-nat' apps/daffin/scripts/office-bench/bench.py; then
+            python3 apps/daffin/scripts/office-bench/bench.py check --office-nat symmetric
+          fi
 
   # The built-in player's tools (apps/daffin/player/tools): their tests. The ones that need the cores built (emcc)
   # or Playwright skip themselves.
@@ -746,6 +763,7 @@ jobs:
       - name: pytest
         working-directory: apps/daffin/player
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           python -m pip install --quiet 'pytest==8.4.2'
           python -m pytest -q --tb=line tools/
 
