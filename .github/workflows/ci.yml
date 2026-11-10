@@ -216,10 +216,10 @@ jobs:
           echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
       - name: Room on the disk (the runner's .NET and Haskell)
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup && df -h / | tail -1
-      - name: WebKitGTK, GTK and libsoup (development files)
+      - name: WebKitGTK, GTK, libsoup and libudev (development files)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -yq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+          sudo apt-get install -yq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev
       - name: Tests
         working-directory: apps/daffin/src-tauri
         run: cargo test --locked --no-fail-fast --message-format=short
@@ -691,6 +691,41 @@ jobs:
           if node scripts/licences.mjs installer "$INSTALLER"; then echo "::error::an installer carrying the placeholder passed"; exit 1; fi
           echo "refused, as it must be"
 
+  # The office bench (apps/daffin/scripts/office-bench): the owner's office (out only TCP 443 and UDP 3478, 19302-19309)
+  # and Home's Freebox (UPnP maps every port, but delivers nothing to its 443) in network namespaces, no root: what
+  # gets through and what does not, as measured on 2026-10-23. It prints its checks only.
+  office-bench:
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      # nft and miniupnpd for the bench's boxes: never started as services on the runner's own network (policy-rc.d
+      # refuses every service start during the install).
+      - name: Network tools for the bench
+        run: |
+          printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+          sudo chmod 755 /usr/sbin/policy-rc.d
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends nftables miniupnpd-nftables
+          sudo rm -f /usr/sbin/policy-rc.d
+          if systemctl is-active --quiet miniupnpd; then sudo systemctl stop miniupnpd; fi
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; the bench runs unprivileged inside one.
+      - name: User namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: The office and the Freebox
+        env:
+          DAFFIN_BENCH_REQUIRED: '1'
+        run: |
+          if [ ! -f apps/daffin/scripts/office-bench/bench.py ]; then echo "no office bench in this commit"; exit 0; fi
+          python3 apps/daffin/scripts/office-bench/bench.py check
+
   # The built-in player's tools (apps/daffin/player/tools): their tests. The ones that need the cores built (emcc)
   # or Playwright skip themselves.
   player-tools:
@@ -716,7 +751,7 @@ jobs:
 
   # One line per job: what the train reads (gh run view --repo moukrea/daffin <run>).
   summary:
-    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows, windows-installer]
+    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows, windows-installer, office-bench]
     if: always()
     runs-on: ubuntu-24.04
     permissions: {}
