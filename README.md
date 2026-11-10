@@ -1,11 +1,12 @@
 # daffin
 
 daffin is nebul.'s games frontend: every game of the home in one library, played from any screen. This repository
-holds its downloads only: the Android app on the [releases](https://github.com/moukrea/daffin/releases) page, and the
-page at [moukrea.github.io/daffin](https://moukrea.github.io/daffin/) that the app reads to update itself. The source
-code is private for now and will be published under the same license. Each release keeps, next to its APK, the
-sources that the licences of the third-party code it contains ask for (`.crate` files and the built-in player's source
-archives), for as long as that APK is distributed. daffin's checks also run here, on GitHub Actions
+holds its downloads only: the Android app and the Linux packages (`.deb` and `.rpm`, x86_64) on the
+[releases](https://github.com/moukrea/daffin/releases) page, and the page at
+[moukrea.github.io/daffin](https://moukrea.github.io/daffin/) that the apps read to update themselves. The source
+code is private for now and will be published under the same license. Each release keeps, next to its APK or its
+packages, the sources that the licences of the third-party code it contains ask for (`.crate` files and the built-in
+player's source archives), for as long as that release is distributed. daffin's checks also run here, on GitHub Actions
 (`.github/workflows/ci.yml`): started by hand on a commit of the private source, which never leaves the runner.
 Releases are kept unless a licence problem forces their withdrawal,
 as on 7 November 2026, when the first two releases were withdrawn because they contained a font whose licence did not

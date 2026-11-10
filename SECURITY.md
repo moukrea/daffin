@@ -28,6 +28,18 @@ of the release that file names from this repository's releases, keeps it only if
 release's `SHA256SUMS`, and checks that it is daffin, newer than the installed app and signed by the same key. Android
 then asks the person to confirm; nothing is installed without their tap.
 
+## The Linux packages and their updates
+
+The Linux packages (`.deb` and `.rpm`) are not signed. To check a downloaded package, compare its SHA-256 with the one
+listed in the release's `SHA256SUMS`.
+
+The desktop app updates itself only from this repository, and only when it was installed from one of these packages.
+It reads `config.json` on this repository's page, downloads the package of the release that file names from this
+repository's releases, and keeps it only if its SHA-256 is the one listed in that release's `SHA256SUMS`. It then hands
+the package to the system's package manager through `pkexec`. The system asks for an administrator's password, and
+nothing is installed without it. Unlike on Android, no signature ties an update to daffin's key. An update is trusted
+because it comes over HTTPS from this repository's releases.
+
 ## Reporting a vulnerability
 
 Report it privately from this repository's Security tab (« Report a vulnerability »), not in public.
