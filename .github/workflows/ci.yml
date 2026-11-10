@@ -499,6 +499,24 @@ jobs:
             grep -E "one\.daffin\.app|RustStdoutStderr|AndroidRuntime|Tauri" "$RUNNER_TEMP/logcat.log" | grep -v "AppsFilter" | tail -60 || true
           fi
           exit $fail
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      # The new code's updater, end to end (apps/daffin/scripts/ci-device-checks.sh): two debug builds pointed at a test
+      # release site the runner serves (127.0.0.1, the emulator's 10.0.2.2), the older installed, its banner and
+      # « Installer », Android's « Update », then the newer one installed. It prints its verdicts only.
+      - name: The update, as a phone gets it
+        run: |
+          set -euo pipefail
+          script=apps/daffin/scripts/ci-device-checks.sh
+          [ -f "$script" ] || { echo "no update check in this commit"; exit 0; }
+          export JAVA_HOME="$JAVA_HOME_21_X64" ANDROID_HOME="$ANDROID_SDK_ROOT" NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
+          export GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.configuration-cache=false"
+          export PATH="$ANDROID_SDK_ROOT/platform-tools:$PATH"
+          serial=$(adb devices | awk 'NR > 1 && $1 ~ /^emulator-/ && $2 == "device" { print $1; exit }')
+          [ -n "$serial" ] || { echo "::error::no emulator"; exit 1; }
+          bash "$script" update --serial "$serial"
 
   # Windows (MSVC): the host's workspace and the app's crate, clippy and tests, and the host and the stream agent built as
   # they ship (kept nowhere: no artifact). Every step runs even after one fails, so that one run says all that breaks.
