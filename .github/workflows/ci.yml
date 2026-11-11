@@ -500,7 +500,7 @@ jobs:
           grep -E "Process: one\.daffin\.app|pid [0-9]+ \(one\.daffin\.app\)|ANR in one\.daffin\.app" "$RUNNER_TEMP/logcat.log" > "$RUNNER_TEMP/fatal.log" || true
           fail=0
           [ -n "$pid" ] || { echo "::error::the app is not running"; fail=1; }
-          echo "$resumed" | grep -q "one.daffin.app/" || { echo "::error::the app is not the resumed activity"; fail=1; }
+          echo "$resumed" | grep "one.daffin.app/" >/dev/null || { echo "::error::the app is not the resumed activity"; fail=1; }
           if [ -s "$RUNNER_TEMP/fatal.log" ]; then echo "::error::a crash or an ANR"; head -20 "$RUNNER_TEMP/fatal.log"; fail=1; fi
           if [ "$fail" = 1 ]; then
             # What Android and the app logged about it: messages, never source.
@@ -743,6 +743,83 @@ jobs:
             python3 apps/daffin/scripts/office-bench/bench.py check --office-nat symmetric
           fi
 
+  # Playing away from home, end to end (apps/daffin/scripts/away_stream_e2e.py), on the office bench: the app paired at
+  # home streams from the office through the Freebox's mapped ports, the relay carrying the signalling only; the office's
+  # NAT as measured, then symmetric. Route A (no GPU here: mutter headless on Mesa's software renderer, WebKitGTK's
+  # WebCodecs on GStreamer's decoder, the agent's H.264 from OpenH264 built from source: a test build, never shipped).
+  # It prints its counts and checks only (report.json stays on the runner).
+  away-e2e:
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-registry-
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          key="$RUNNER_TEMP/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          cargo fetch --locked
+          (cd apps/daffin/src-tauri && cargo fetch --locked)
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - name: Room on the disk (the runner's .NET and Haskell)
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup && df -h / | tail -1
+      # The app's build files; the bench's boxes (nft, miniupnpd: never started as services on the runner's own network,
+      # policy-rc.d refuses every service start during the install); the private display (mutter on Mesa's software
+      # renderer, in its own D-Bus session); WebKitGTK's H.264 decoder (GStreamer's libav).
+      - name: Build files, the bench's tools, the display, the decoder
+        run: |
+          printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+          sudo chmod 755 /usr/sbin/policy-rc.d
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev nftables miniupnpd-nftables mutter dbus dbus-user-session libgl1-mesa-dri libegl-mesa0 gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+          sudo rm -f /usr/sbin/policy-rc.d
+          if systemctl is-active --quiet miniupnpd; then sudo systemctl stop miniupnpd; fi
+      - name: User namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: The host and its agent (release, OpenH264 from source)
+        run: cargo build --locked --release -p daffin-host -p daffin-stream-agent --features daffin-stream-agent/bundled-openh264 --message-format=short
+      - name: The app (debug, its relay the bench's)
+        working-directory: apps/daffin/src-tauri
+        run: DAFFIN_AWAY_RELAY=ws://127.0.0.1:47443 cargo build --locked --message-format=short
+      # Route A (the page decodes with the system's decoders), 640x360, 120 frames: OpenH264 in software on 4 cores. The
+      # e2e prints one JSON line whatever happens (counts, checks, or what failed: its type, message and script:line).
+      - name: Home, then the office (the NAT as measured, then symmetric)
+        env:
+          DAFFIN_BENCH_REQUIRED: '1'
+          # No GPU here: Mesa's software renderer for mutter.
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          if [ ! -f apps/daffin/scripts/away_stream_e2e.py ]; then echo "no away e2e in this commit"; exit 0; fi
+          # WebKitGTK without compositing: on Mesa's software renderer its compositor stalls the page.
+          e2e() { python3 apps/daffin/scripts/away_stream_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --route a --size 640x360 --frames 120 --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 "$@"; }
+          e2e --out "$RUNNER_TEMP/away"
+          e2e --out "$RUNNER_TEMP/away-symmetric" --office-nat symmetric
+
   # The built-in player's tools (apps/daffin/player/tools): their tests. The ones that need the cores built (emcc)
   # or Playwright skip themselves.
   player-tools:
@@ -769,7 +846,7 @@ jobs:
 
   # One line per job: what the train reads (gh run view --repo moukrea/daffin <run>).
   summary:
-    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows, windows-installer, office-bench]
+    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows, windows-installer, office-bench, away-e2e]
     if: always()
     runs-on: ubuntu-24.04
     permissions: {}
