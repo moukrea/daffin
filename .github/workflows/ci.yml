@@ -690,6 +690,25 @@ jobs:
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           node apps/daffin/scripts/licences.mjs installer "$INSTALLER"
+      # windows-smoke (d049), NON-BLOCKING while it is new: the Windows app had never run on a real Windows. The installer
+      # above, installed silently for this user, daffin.exe started with WebView2's DevTools on a local port, its first
+      # screen named and, on the welcome screen, « Partager les jeux de cet ordinateur » pressed and the host's answer
+      # checked; then closed and uninstalled (apps/daffin/scripts/ci-windows-smoke.sh: fixed words only, also in the
+      # run's summary). Its steps continue on error: this job's result, summary's and the publications' never depend on
+      # them. Before the placeholder step below, which bundles the installer again.
+      - name: windows-smoke (non-blocking), the app installed, started and read
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          bash apps/daffin/scripts/ci-windows-smoke.sh run "$INSTALLER"
+      - name: windows-smoke (non-blocking), the app closed and uninstalled
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          bash apps/daffin/scripts/ci-windows-smoke.sh clean
       # The refusal itself, on a real installer: as if bundle had not run, build.rs's placeholder in place of the notices,
       # the same build bundled again without the beforeBundleCommand.
       - name: An installer that carries the placeholder is refused
