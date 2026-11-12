@@ -22,6 +22,11 @@ on:
         required: false
         default: ''
         type: string
+      release:
+        description: 'A release run: the desktop release (desktop-v<version>-<build>) whose Windows installer goes to a draft of it'
+        required: false
+        default: ''
+        type: string
 permissions: {}
 concurrency:
   group: ci-${{ inputs.sha }}
@@ -224,8 +229,19 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup && df -h / | tail -1
       - name: WebKitGTK, GTK, libsoup and libudev (development files)
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -yq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev
+          set -euo pipefail
+          # The runner's mirror (azure.archive.ubuntu.com) sometimes does not resolve: every fetch tried 4 times with a
+          # short timeout, a failed index an error (apt-get update says nothing otherwise), and on a failure, or a name
+          # that does not resolve, archive.ubuntu.com in its place, the lists read again and the command once more.
+          apt_get() { sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any "$@"; }
+          apt_archive() {
+            echo "::warning::azure.archive.ubuntu.com failed: archive.ubuntu.com instead"
+            sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i 's#//azure\.archive\.ubuntu\.com/#//archive.ubuntu.com/#g' {} +
+          }
+          apt_try() { apt_get "$@" || { apt_archive; apt_get update -q && apt_get "$@"; }; }
+          getent hosts azure.archive.ubuntu.com > /dev/null || apt_archive
+          apt_try update -q
+          apt_try install -yq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev
       - name: Tests
         working-directory: apps/daffin/src-tauri
         run: cargo test --locked --no-fail-fast --message-format=short
@@ -601,8 +617,9 @@ jobs:
         working-directory: apps/daffin/src-tauri
         run: cargo test --locked --no-fail-fast --message-format=short
 
-  # The Windows installer (NSIS) as `cargo tauri build` makes it, kept nowhere: it must carry THIRD-PARTY-LICENSES, the
-  # notices of this Cargo.lock for Windows (licences.mjs installer), never the placeholder build.rs writes for cargo.
+  # The Windows installer (NSIS) as scripts/windows-package.sh makes it (daffin-host beside the app), kept nowhere: it
+  # must carry THIRD-PARTY-LICENSES, the notices of the app and the host for Windows (licences.mjs installer), never the
+  # placeholder build.rs writes for cargo.
   windows-installer:
     needs: guard
     runs-on: windows-2025
@@ -641,6 +658,8 @@ jobs:
           echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$tmp/known_hosts"
           export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts"
           export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          # The host's workspace too, when the installer carries daffin-host (apps/daffin/scripts/windows-package.sh).
+          if [ -f apps/daffin/scripts/windows-package.sh ]; then cargo fetch --locked; fi
           (cd apps/daffin/src-tauri && cargo fetch --locked)
           rm -f "$key"
           echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
@@ -676,39 +695,32 @@ jobs:
       - name: The installer (NSIS)
         working-directory: apps/daffin
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
           # The build's own output names source lines (rustc's): it stays in a file, and the log gets the diagnostics'
           # first lines and locations, the CLI's steps and the licences script's lines, nothing else.
           bundle_log() { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[[:space:]]*(Error|Warn|Info|Running|Finished|Bundling) |^licences: |^check-public: ' "$RUNNER_TEMP/bundle.log" | head -200 || true; }
-          cargo tauri build --bundles nsis --ci > "$RUNNER_TEMP/bundle.log" 2>&1 || { bundle_log; exit 1; }
-          bundle_log | tail -8
-          exe=$(find src-tauri/target/release/bundle/nsis -name "*-setup.exe" | sort | head -1)
+          # The installer as it ships: daffin-host beside the app (scripts/windows-package.sh, the agent in it), per user,
+          # its hooks; a commit from before that script, the app alone.
+          if [ -f scripts/windows-package.sh ]; then
+            out="$(cygpath -u "$RUNNER_TEMP")/windows-release"
+            bash scripts/windows-package.sh --out "$out" > "$RUNNER_TEMP/bundle.log" 2>&1 || { bundle_log; exit 1; }
+            bundle_log | tail -8
+            exe=$(find "$out" -name "*-setup.exe" | sort | head -1)
+            echo DAFFIN_BUNDLE_BINARIES=app,host >> "$GITHUB_ENV"
+          else
+            cargo tauri build --bundles nsis --ci > "$RUNNER_TEMP/bundle.log" 2>&1 || { bundle_log; exit 1; }
+            bundle_log | tail -8
+            exe=$(find src-tauri/target/release/bundle/nsis -name "*-setup.exe" | sort | head -1)
+          fi
           [ -n "$exe" ] || { echo "::error::no installer"; exit 1; }
           echo "built $exe: $(stat -c %s "$exe") bytes"
-          echo "INSTALLER=$PWD/$exe" >> "$GITHUB_ENV"
+          case "$exe" in /*) ;; *) exe=$PWD/$exe ;; esac
+          echo "INSTALLER=$exe" >> "$GITHUB_ENV"
       - name: The installer carries the notices, never the placeholder
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           node apps/daffin/scripts/licences.mjs installer "$INSTALLER"
-      # windows-smoke (d049), NON-BLOCKING while it is new: the Windows app had never run on a real Windows. The installer
-      # above, installed silently for this user, daffin.exe started with WebView2's DevTools on a local port, its first
-      # screen named and, on the welcome screen, « Partager les jeux de cet ordinateur » pressed and the host's answer
-      # checked; then closed and uninstalled (apps/daffin/scripts/ci-windows-smoke.sh: fixed words only, also in the
-      # run's summary). Its steps continue on error: this job's result, summary's and the publications' never depend on
-      # them. Before the placeholder step below, which bundles the installer again.
-      - name: windows-smoke (non-blocking), the app installed, started and read
-        continue-on-error: true
-        timeout-minutes: 10
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          bash apps/daffin/scripts/ci-windows-smoke.sh run "$INSTALLER"
-      - name: windows-smoke (non-blocking), the app closed and uninstalled
-        if: always()
-        continue-on-error: true
-        timeout-minutes: 10
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          bash apps/daffin/scripts/ci-windows-smoke.sh clean
       # The refusal itself, on a real installer: as if bundle had not run, build.rs's placeholder in place of the notices,
       # the same build bundled again without the beforeBundleCommand.
       - name: An installer that carries the placeholder is refused
@@ -717,10 +729,233 @@ jobs:
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
           node --input-type=module -e "import { writeFileSync } from 'node:fs'; import { NOTICES_PLACEHOLDER } from './scripts/licences.mjs'; writeFileSync('src-tauri/target/licences/THIRD-PARTY-LICENSES', NOTICES_PLACEHOLDER + '\n');"
+          # The installer this bundle writes, alone in its folder (windows-package.sh's was copied out of it, $INSTALLER).
+          rm -rf src-tauri/target/release/bundle/nsis
           cargo tauri bundle --bundles nsis --ci --config '{"build":{"beforeBundleCommand":null}}' > "$RUNNER_TEMP/placeholder.log" 2>&1 ||
             { grep -E '^[[:space:]]*(Error|Warn) ' "$RUNNER_TEMP/placeholder.log" | head -20 || true; exit 1; }
-          if node scripts/licences.mjs installer "$INSTALLER"; then echo "::error::an installer carrying the placeholder passed"; exit 1; fi
+          placeholder=$(find src-tauri/target/release/bundle/nsis -name "*-setup.exe" | sort | head -1)
+          [ -n "$placeholder" ] || { echo "::error::no installer bundled with the placeholder"; exit 1; }
+          if node scripts/licences.mjs installer "$placeholder"; then echo "::error::an installer carrying the placeholder passed"; exit 1; fi
           echo "refused, as it must be"
+
+  # A release run only (the `release` input): the Windows installer of that desktop release, built as the windows-installer
+  # job builds it (apps/daffin/scripts/windows-package.sh) from the commit tested, then uploaded with its SHA-256 to that
+  # release of this repository as a DRAFT, which only the repository's owner sees. The only job whose token writes, and
+  # only that (scripts/check-public.mjs RELEASE_JOB): the draft goes public through desktop-release.sh, on the owner's
+  # yes. The build's output stays in a file; the log gets its diagnostics' first lines and the CLI's steps.
+  windows-release:
+    needs: guard
+    if: ${{ inputs.release != '' }}
+    runs-on: windows-2025
+    permissions:
+      contents: write
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: windows-cargo-registry-
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          key="$tmp/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$tmp/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          # The host's workspace too, when the installer carries daffin-host (apps/daffin/scripts/windows-package.sh).
+          if [ -f apps/daffin/scripts/windows-package.sh ]; then cargo fetch --locked; fi
+          (cd apps/daffin/src-tauri && cargo fetch --locked)
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - id: tauri-cli
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      - name: Tauri's CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: CARGO_NET_OFFLINE=false cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION"
+      - if: steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      # licences.mjs bundle (the beforeBundleCommand) runs the licence gate first.
+      - name: cargo-deny
+        run: |
+          set -euo pipefail
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          url=https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-pc-windows-msvc.tar.gz
+          curl -fsSL "$url" -o "$tmp/deny.tgz"
+          echo "975a22143262fd27476d19ee00c7af67978426e40e1dee94eed6bbade1cf87dc  $tmp/deny.tgz" | sha256sum -c -
+          mkdir -p "$tmp/deny"
+          tar -xzf "$tmp/deny.tgz" -C "$tmp/deny" --strip-components=1
+          cp "$tmp/deny/cargo-deny.exe" ~/.cargo/bin/
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: The release's installer and its SHA-256
+        working-directory: apps/daffin
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          [[ "$RELEASE" =~ ^desktop-v(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]?)\.(0|[1-9][0-9]?)-([1-9][0-9]{0,2})$ ]] || { echo "::error::release must be a desktop-v<version>-<build> tag"; exit 1; }
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          [ "desktop-v$version-${RELEASE##*-}" = "$RELEASE" ] || { echo "::error::$RELEASE is not tauri.conf.json's version $version"; exit 1; }
+          out=$(cygpath -u "$RUNNER_TEMP")/release
+          mkdir -p "$out"
+          bash scripts/windows-package.sh --build "${RELEASE##*-}" --out "$out/build" > "$RUNNER_TEMP/package.log" 2>&1 ||
+            { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[[:space:]]*(Error|Warn|Info|Running|Finished|Bundling) |^licences: |^windows-package: ' "$RUNNER_TEMP/package.log" | head -200 || true; exit 1; }
+          exe="$out/build/daffin-$RELEASE-x86_64-setup.exe"
+          [ -f "$exe" ] || { echo "::error::windows-package.sh made no daffin-$RELEASE-x86_64-setup.exe"; exit 1; }
+          # The notices of what it carries (the app and daffin-host), never build.rs's placeholder.
+          DAFFIN_BUNDLE_BINARIES=app,host node scripts/licences.mjs installer "$exe"
+          cp "$exe" "$out/daffin-$RELEASE-x86_64.exe"
+          # « <hash>  <name> » as on Linux (Git Bash's sha256sum writes « <hash> *<name> »).
+          printf '%s  %s\n' "$(sha256sum < "$out/daffin-$RELEASE-x86_64.exe" | cut -c1-64)" "daffin-$RELEASE-x86_64.exe" > "$out/SHA256SUMS.windows"
+          echo "built daffin-$RELEASE-x86_64.exe: $(stat -c %s "$out/daffin-$RELEASE-x86_64.exe") bytes, $(cut -c1-64 "$out/SHA256SUMS.windows")"
+      - name: To the release, as a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE" =~ ^desktop-v(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]?)\.(0|[1-9][0-9]?)-([1-9][0-9]{0,2})$ ]] || { echo "::error::release must be a desktop-v<version>-<build> tag"; exit 1; }
+          out=$(cygpath -u "$RUNNER_TEMP")/release
+          state=$(gh release view "$RELEASE" --repo moukrea/daffin --json isDraft --jq .isDraft 2>/dev/null || echo none)
+          [ "$state" != none ] || gh release create "$RELEASE" --repo moukrea/daffin --draft --title "$RELEASE" --notes ""
+          [ "$(gh release view "$RELEASE" --repo moukrea/daffin --json isDraft --jq .isDraft)" = true ] || { echo "::error::$RELEASE is not a draft: this job uploads to a draft only"; exit 1; }
+          gh release upload "$RELEASE" "$out/daffin-$RELEASE-x86_64.exe" "$out/SHA256SUMS.windows" --repo moukrea/daffin --clobber
+          echo "uploaded to the draft $RELEASE"
+
+  # windows-smoke (d049, lot 20), NON-BLOCKING until lot 20 is merged: the Windows app and its host on a real
+  # Windows (apps/daffin/scripts/ci-windows-smoke.sh: fixed words only, also in the run's summary). Three installers of
+  # the commit made for a test update site on this runner (debug assertions: never a release's); a made-up game per
+  # Windows scanner (files, a .GamingRoot, registry keys under a test root of HKCU); -901 installed silently for this
+  # user, daffin.exe started with WebView2's DevTools on a local port and its first screen named; « Partager » (its
+  # button, else its command) and the host's Run entry; host.info on its pipe and the fixtures in its scan; the agent's
+  # encoders measured (Media Foundation's software transform, then Cisco's OpenH264); a Windows.Graphics.Capture open
+  # tried; an update to -902, then one to -903 rolled back; then all closed, uninstalled with no Run entry left, and the
+  # fixtures removed.
+  windows-smoke:
+    needs: guard
+    runs-on: windows-2025
+    permissions: {}
+    timeout-minutes: 150
+    # Non-blocking until lot 20 is merged: a failure here never fails the run, and summary does not wait for it.
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: windows-cargo-registry-
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          key="$tmp/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$tmp/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          # The host's workspace too, when the installer carries daffin-host (apps/daffin/scripts/windows-package.sh).
+          if [ -f apps/daffin/scripts/windows-package.sh ]; then cargo fetch --locked; fi
+          (cd apps/daffin/src-tauri && cargo fetch --locked)
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - id: tauri-cli
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      - name: Tauri's CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: CARGO_NET_OFFLINE=false cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION"
+      - if: steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      # licences.mjs bundle (the beforeBundleCommand) runs the licence gate first.
+      - name: cargo-deny
+        run: |
+          set -euo pipefail
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          url=https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-pc-windows-msvc.tar.gz
+          curl -fsSL "$url" -o "$tmp/deny.tgz"
+          echo "975a22143262fd27476d19ee00c7af67978426e40e1dee94eed6bbade1cf87dc  $tmp/deny.tgz" | sha256sum -c -
+          mkdir -p "$tmp/deny"
+          tar -xzf "$tmp/deny.tgz" -C "$tmp/deny" --strip-components=1
+          cp "$tmp/deny/cargo-deny.exe" ~/.cargo/bin/
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Three test installers (-901, -902, and -903 whose host never answers), for the update site
+        continue-on-error: true
+        timeout-minutes: 100
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          bash apps/daffin/scripts/ci-windows-smoke.sh builds
+      # One step: GitHub Actions ends a step's leftover processes, and the app and the host must outlive each check.
+      - name: "The checks: fixtures, -901 installed and read, « Partager », the host's pipe and scan, the encoders, WGC (tried), the update and its rollback"
+        continue-on-error: true
+        timeout-minutes: 75
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          bash apps/daffin/scripts/ci-windows-smoke.sh checks
+      - name: The app closed and uninstalled
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          bash apps/daffin/scripts/ci-windows-smoke.sh clean
 
   # The office bench (apps/daffin/scripts/office-bench): the owner's office (out only TCP 443 and UDP 3478, 19302-19309)
   # and Home's Freebox (UPnP maps every port, but delivers nothing to its 443) in network namespaces, no root: what
@@ -743,8 +978,18 @@ jobs:
         run: |
           printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
           sudo chmod 755 /usr/sbin/policy-rc.d
-          sudo apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends nftables miniupnpd-nftables
+          # The runner's mirror (azure.archive.ubuntu.com) sometimes does not resolve: every fetch tried 4 times with a
+          # short timeout, a failed index an error (apt-get update says nothing otherwise), and on a failure, or a name
+          # that does not resolve, archive.ubuntu.com in its place, the lists read again and the command once more.
+          apt_get() { sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any "$@"; }
+          apt_archive() {
+            echo "::warning::azure.archive.ubuntu.com failed: archive.ubuntu.com instead"
+            sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i 's#//azure\.archive\.ubuntu\.com/#//archive.ubuntu.com/#g' {} +
+          }
+          apt_try() { apt_get "$@" || { apt_archive; apt_get update -q && apt_get "$@"; }; }
+          getent hosts azure.archive.ubuntu.com > /dev/null || apt_archive
+          apt_try update -q
+          apt_try install -y -q --no-install-recommends nftables miniupnpd-nftables
           sudo rm -f /usr/sbin/policy-rc.d
           if systemctl is-active --quiet miniupnpd; then sudo systemctl stop miniupnpd; fi
       # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; the bench runs unprivileged inside one.
@@ -838,6 +1083,18 @@ jobs:
           e2e() { python3 apps/daffin/scripts/away_stream_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --route a --size 640x360 --frames 120 --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 "$@"; }
           e2e --out "$RUNNER_TEMP/away"
           e2e --out "$RUNNER_TEMP/away-symmetric" --office-nat symmetric
+      # The page's decoder with WebKitGTK's hardware acceleration off on WebKitGTK 2.54, Fedora's, which the Linux
+      # packages meet there (apps/daffin/scripts/ci-webkit-noaccel.sh, in a Fedora container, the checkout read-only):
+      # 2.54 aborted the web process at the first VideoDecoder without a shared GL display (desktop-v0.0.1-2); the
+      # runner's own WebKitGTK (Ubuntu 24.04's 2.52, the away e2e's noaccel phase above) never had that code. The
+      # owner, 11 Nov 2026: a fixed step of every desktop release.
+      - name: The page's decoder with acceleration off, on WebKitGTK 2.54 (Fedora)
+        if: ${{ !cancelled() }}
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          if [ ! -f apps/daffin/scripts/ci-webkit-noaccel.sh ]; then echo "no WebKitGTK 2.54 check in this commit"; exit 0; fi
+          docker run --rm -v "$PWD:/src:ro" registry.fedoraproject.org/fedora:43 bash /src/apps/daffin/scripts/ci-webkit-noaccel.sh /src
 
   # The built-in player's tools (apps/daffin/player/tools): their tests. The ones that need the cores built (emcc)
   # or Playwright skip themselves.
