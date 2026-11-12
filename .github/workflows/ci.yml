@@ -1083,6 +1083,18 @@ jobs:
           e2e() { python3 apps/daffin/scripts/away_stream_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --route a --size 640x360 --frames 120 --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 "$@"; }
           e2e --out "$RUNNER_TEMP/away"
           e2e --out "$RUNNER_TEMP/away-symmetric" --office-nat symmetric
+      # Every machine at once (lot 23): the same app with two test hosts, one tile for a game both have, the office
+      # stopped and back, the app started again with both away (apps/daffin/scripts/two_machines_e2e.py). Nothing is
+      # streamed; the e2e prints one JSON line whatever happens (checks, or what failed).
+      - name: Two machines at once
+        if: ${{ !cancelled() }}
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          if [ ! -f apps/daffin/scripts/two_machines_e2e.py ]; then echo "no two-machine e2e in this commit"; exit 0; fi
+          python3 apps/daffin/scripts/two_machines_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 --out "$RUNNER_TEMP/two"
       # The page's decoder with WebKitGTK's hardware acceleration off on WebKitGTK 2.54, Fedora's, which the Linux
       # packages meet there (apps/daffin/scripts/ci-webkit-noaccel.sh, in a Fedora container, the checkout read-only):
       # 2.54 aborted the web process at the first VideoDecoder without a shared GL display (desktop-v0.0.1-2); the
