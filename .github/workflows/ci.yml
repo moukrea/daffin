@@ -183,8 +183,36 @@ jobs:
           echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
       - name: Room on the disk (the runner's .NET and Haskell)
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup && df -h / | tail -1
-      - name: Tests (every feature)
-        run: cargo test --locked --workspace --all-features --no-fail-fast --message-format=short
+      # The tests are built first, with the job's network (no download is left for them); then they run in a network
+      # namespace of their own that has loopback only: a test that reaches any other address fails here (AGENTS.md: never
+      # a live service). The preflight proves that namespace has loopback alone and that a connection out of it fails
+      # at once; a preflight that cannot run stops the job too. sudo makes the namespace, then the tests run as the
+      # runner's user again with its environment (sudo's own variables dropped, its HOME, PATH and user name put back)
+      # and --offline: a download left for them is an error, not a fetch. Windows and macOS have no such namespace: they
+      # rely on the in-code guard only (daffin-host's net.rs, the app's net.rs: loopback-only in test builds).
+      - name: Tests (every feature), built
+        run: cargo test --locked --workspace --all-features --no-run --message-format=short
+      - name: Tests (every feature), with no network but loopback
+        run: |
+          set -euo pipefail
+          sudo --preserve-env unshare --net -- sh -c '
+            set -eu
+            ip link set lo up || { echo "::error::Loopback could not be raised in the tests namespace"; exit 1; }
+            links=$(ip -o link show | wc -l)
+            if [ "$links" != 1 ]; then
+              echo "::error::The tests namespace has $links network interfaces, not loopback alone: the tests do not run"
+              exit 1
+            fi
+            rc=0
+            timeout 5 bash -c "</dev/tcp/1.1.1.1/443" 2>/dev/null || rc=$?
+            if [ "$rc" != 1 ]; then
+              echo "::error::A connection out of the tests namespace did not fail at once (exit $rc, 1 wanted): the tests do not run"
+              exit 1
+            fi
+            exec setpriv --reuid="$1" --regid="$2" --init-groups env -u SUDO_COMMAND -u SUDO_USER -u SUDO_UID -u SUDO_GID \
+              HOME="$3" PATH="$4" USER="$5" LOGNAME="$5" CARGO_NET_OFFLINE=true \
+              cargo test --locked --offline --workspace --all-features --no-fail-fast --message-format=short
+          ' _ "$(id -u)" "$(id -g)" "$HOME" "$PATH" "$(id -un)"
       - name: Clippy (every target and feature, warnings denied)
         if: always()
         run: cargo clippy --locked --workspace --all-targets --all-features --message-format=short -- -D warnings
@@ -242,9 +270,32 @@ jobs:
           getent hosts azure.archive.ubuntu.com > /dev/null || apt_archive
           apt_try update -q
           apt_try install -yq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev
-      - name: Tests
+      # As the workspace's: built first, then run with no network but loopback (the same preflight).
+      - name: Tests, built
         working-directory: apps/daffin/src-tauri
-        run: cargo test --locked --no-fail-fast --message-format=short
+        run: cargo test --locked --no-run --message-format=short
+      - name: Tests, with no network but loopback
+        working-directory: apps/daffin/src-tauri
+        run: |
+          set -euo pipefail
+          sudo --preserve-env unshare --net -- sh -c '
+            set -eu
+            ip link set lo up || { echo "::error::Loopback could not be raised in the tests namespace"; exit 1; }
+            links=$(ip -o link show | wc -l)
+            if [ "$links" != 1 ]; then
+              echo "::error::The tests namespace has $links network interfaces, not loopback alone: the tests do not run"
+              exit 1
+            fi
+            rc=0
+            timeout 5 bash -c "</dev/tcp/1.1.1.1/443" 2>/dev/null || rc=$?
+            if [ "$rc" != 1 ]; then
+              echo "::error::A connection out of the tests namespace did not fail at once (exit $rc, 1 wanted): the tests do not run"
+              exit 1
+            fi
+            exec setpriv --reuid="$1" --regid="$2" --init-groups env -u SUDO_COMMAND -u SUDO_USER -u SUDO_UID -u SUDO_GID \
+              HOME="$3" PATH="$4" USER="$5" LOGNAME="$5" CARGO_NET_OFFLINE=true \
+              cargo test --locked --offline --no-fail-fast --message-format=short
+          ' _ "$(id -u)" "$(id -g)" "$HOME" "$PATH" "$(id -un)"
       - name: Clippy (every target, warnings denied)
         if: always()
         working-directory: apps/daffin/src-tauri
