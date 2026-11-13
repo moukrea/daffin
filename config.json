@@ -2,6 +2,6 @@
   "version": 1,
   "page": "https://moukrea.github.io/daffin/",
   "repository": "moukrea/daffin",
-  "androidRelease": "android-v0.0.1-23",
+  "androidRelease": "android-v0.0.1-24",
   "desktopRelease": "desktop-v0.0.1-11"
 }
