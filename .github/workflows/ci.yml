@@ -592,7 +592,9 @@ jobs:
           export PATH="$ANDROID_SDK_ROOT/platform-tools:$PATH"
           serial=$(adb devices | awk 'NR > 1 && $1 ~ /^emulator-/ && $2 == "device" { print $1; exit }')
           [ -n "$serial" ] || { echo "::error::no emulator"; exit 1; }
-          bash "$script" update --serial "$serial"
+          # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
+          G="node scripts/ci-skips.mjs android-emulator --"; [ -f scripts/ci-skips.mjs ] || G=""
+          $G bash "$script" update --serial "$serial"
 
   # Windows (MSVC): the host's workspace and the app's crate, clippy and tests, and the host and the stream agent built as
   # they ship (kept nowhere: no artifact). Every step runs even after one fails, so that one run says all that breaks.
@@ -999,7 +1001,9 @@ jobs:
         timeout-minutes: 75
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          bash apps/daffin/scripts/ci-windows-smoke.sh checks
+          # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
+          G="node scripts/ci-skips.mjs windows-smoke --"; [ -f scripts/ci-skips.mjs ] || G=""
+          $G bash apps/daffin/scripts/ci-windows-smoke.sh checks
       - name: The app closed and uninstalled
         if: always()
         continue-on-error: true
@@ -1052,10 +1056,12 @@ jobs:
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           if [ ! -f apps/daffin/scripts/office-bench/bench.py ]; then echo "no office bench in this commit"; exit 0; fi
-          python3 apps/daffin/scripts/office-bench/bench.py check
+          # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
+          G="node scripts/ci-skips.mjs office-bench --"; [ -f scripts/ci-skips.mjs ] || G=""
+          $G python3 apps/daffin/scripts/office-bench/bench.py check
           # The same with a symmetric office NAT (a phone on a carrier network), where the bench has the option.
           if grep -q -- '--office-nat' apps/daffin/scripts/office-bench/bench.py; then
-            python3 apps/daffin/scripts/office-bench/bench.py check --office-nat symmetric
+            $G python3 apps/daffin/scripts/office-bench/bench.py check --office-nat symmetric
           fi
 
   # Playing away from home, end to end (apps/daffin/scripts/away_stream_e2e.py), on the office bench: the app paired at
@@ -1131,7 +1137,9 @@ jobs:
           set -euo pipefail
           if [ ! -f apps/daffin/scripts/away_stream_e2e.py ]; then echo "no away e2e in this commit"; exit 0; fi
           # WebKitGTK without compositing: on Mesa's software renderer its compositor stalls the page.
-          e2e() { python3 apps/daffin/scripts/away_stream_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --route a --size 640x360 --frames 120 --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 "$@"; }
+          # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
+          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
+          e2e() { $G python3 apps/daffin/scripts/away_stream_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --route a --size 640x360 --frames 120 --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 "$@"; }
           e2e --out "$RUNNER_TEMP/away"
           e2e --out "$RUNNER_TEMP/away-symmetric" --office-nat symmetric
       # Every machine at once (lot 23): the same app with two test hosts, one tile for a game both have, the office
@@ -1145,7 +1153,8 @@ jobs:
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
           if [ ! -f apps/daffin/scripts/two_machines_e2e.py ]; then echo "no two-machine e2e in this commit"; exit 0; fi
-          python3 apps/daffin/scripts/two_machines_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 --out "$RUNNER_TEMP/two"
+          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
+          $G python3 apps/daffin/scripts/two_machines_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 --out "$RUNNER_TEMP/two"
       # The page's decoder with WebKitGTK's hardware acceleration off on WebKitGTK 2.54, Fedora's, which the Linux
       # packages meet there (apps/daffin/scripts/ci-webkit-noaccel.sh, in a Fedora container, the checkout read-only):
       # 2.54 aborted the web process at the first VideoDecoder without a shared GL display (desktop-v0.0.1-2); the
@@ -1157,7 +1166,8 @@ jobs:
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
           if [ ! -f apps/daffin/scripts/ci-webkit-noaccel.sh ]; then echo "no WebKitGTK 2.54 check in this commit"; exit 0; fi
-          docker run --rm -v "$PWD:/src:ro" registry.fedoraproject.org/fedora:43 bash /src/apps/daffin/scripts/ci-webkit-noaccel.sh /src
+          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
+          $G docker run --rm -v "$PWD:/src:ro" registry.fedoraproject.org/fedora:43 bash /src/apps/daffin/scripts/ci-webkit-noaccel.sh /src
 
   # The built-in player's tools (apps/daffin/player/tools): their tests. The ones that need the cores built (emcc)
   # or Playwright skip themselves.
