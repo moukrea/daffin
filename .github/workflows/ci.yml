@@ -906,7 +906,8 @@ jobs:
           gh release upload "$RELEASE" "$out/daffin-$RELEASE-x86_64.exe" "$out/SHA256SUMS.windows" --repo moukrea/daffin --clobber
           echo "uploaded to the draft $RELEASE"
 
-  # windows-smoke (d049, lot 20), NON-BLOCKING until lot 20 is merged: the Windows app and its host on a real
+  # windows-smoke (d049, lot 20), blocking since the Windows publish path (it was non-blocking until lot 20 merged, and
+  # green on every run since): the Windows app and its host on a real
   # Windows (apps/daffin/scripts/ci-windows-smoke.sh: fixed words only, also in the run's summary). Three installers of
   # the commit made for a test update site on this runner (debug assertions: never a release's); a made-up game per
   # Windows scanner (files, a .GamingRoot, registry keys under a test root of HKCU); -901 installed silently for this
@@ -920,8 +921,6 @@ jobs:
     runs-on: windows-2025
     permissions: {}
     timeout-minutes: 150
-    # Non-blocking until lot 20 is merged: a failure here never fails the run, and summary does not wait for it.
-    continue-on-error: true
     defaults:
       run:
         shell: bash
@@ -990,14 +989,12 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
       - name: Three test installers (-901, -902, and -903 whose host never answers), for the update site
-        continue-on-error: true
         timeout-minutes: 100
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           bash apps/daffin/scripts/ci-windows-smoke.sh builds
       # One step: GitHub Actions ends a step's leftover processes, and the app and the host must outlive each check.
       - name: "The checks: fixtures, -901 installed and read, « Partager », the host's pipe and scan, the encoders, WGC (tried), the update and its rollback"
-        continue-on-error: true
         timeout-minutes: 75
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
@@ -1006,7 +1003,6 @@ jobs:
           $G bash apps/daffin/scripts/ci-windows-smoke.sh checks
       - name: The app closed and uninstalled
         if: always()
-        continue-on-error: true
         timeout-minutes: 10
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
@@ -1195,7 +1191,7 @@ jobs:
 
   # One line per job: what the train reads (gh run view --repo moukrea/daffin <run>).
   summary:
-    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows, windows-installer, office-bench, away-e2e]
+    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows, windows-installer, windows-smoke, office-bench, away-e2e]
     if: always()
     runs-on: ubuntu-24.04
     permissions: {}

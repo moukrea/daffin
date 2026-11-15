@@ -1,8 +1,9 @@
 # daffin
 
 daffin is nebul.'s games frontend: every game of the home in one library, played from any screen. This repository
-holds its downloads only: the Android app and the Linux packages (`.deb` and `.rpm`, x86_64) on the
-[releases](https://github.com/moukrea/daffin/releases) page, and the page at
+holds its downloads only: the Android app, the Linux packages (`.deb` and `.rpm`, x86_64) and, in the releases that
+carry one, the Windows installer (`.exe`, x86_64) on the [releases](https://github.com/moukrea/daffin/releases) page,
+and the page at
 [moukrea.github.io/daffin](https://moukrea.github.io/daffin/) that the apps read to update themselves. The source
 code is private for now and will be published under the same license. Each release keeps, next to its APK or its
 packages, the sources that the licences of the third-party code it contains ask for (`.crate` files and the built-in
@@ -11,6 +12,11 @@ player's source archives), for as long as that release is distributed. daffin's 
 Releases are kept unless a licence problem forces their withdrawal,
 as on 7 November 2026, when the first two releases were withdrawn because they contained a font whose licence did not
 allow publishing it.
+
+Nothing here is signed with a paid certificate, for Windows or macOS. The Windows installer is unsigned: every new
+installer downloaded from here makes Windows' SmartScreen show « Windows a protégé votre ordinateur » (« Windows
+protected your PC »); « Informations complémentaires » (« More info »), then « Exécuter quand même » (« Run anyway »),
+runs it. Check its SHA-256 against the release's `SHA256SUMS` first (SECURITY.md).
 
 daffin is a preview for invited testers: there is no warranty and no support, and issues and pull requests are not
 accepted here. See [SECURITY.md](SECURITY.md) for the security model and for checking a download. daffin is licensed

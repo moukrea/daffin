@@ -40,6 +40,22 @@ the package to the system's package manager through `pkexec`. The system asks fo
 nothing is installed without it. Unlike on Android, no signature ties an update to daffin's key. An update is trusted
 because it comes over HTTPS from this repository's releases.
 
+## The Windows installer and its updates
+
+The Windows installer (`.exe`, in the releases that carry one) and the programs it installs are not signed, and no
+signing certificate is bought. Windows' SmartScreen therefore warns every time a new installer downloaded from here
+is run: « Windows a protégé votre ordinateur » (« Windows protected your PC »), then « Informations complémentaires »
+(« More info ») and « Exécuter quand même » (« Run anyway »). Before that, compare the installer's SHA-256 with the one
+listed in the release's `SHA256SUMS`. It installs for the current user only, in their own folder, and needs no
+administrator.
+
+The Windows app updates itself only from this repository, and only when it was installed by this installer. It reads
+`config.json` on this repository's page, downloads the installer of the release that file names for Windows from this
+repository's releases, and keeps it only if its SHA-256 is the one listed in that release's `SHA256SUMS`. It then runs
+it for the current user, with no window. If the computer shares its games and its new host does not answer, the
+previous version is put back. No signature ties an update to daffin, and nothing asks the person to confirm it after
+they chose to install it. An update is trusted because it comes over HTTPS from this repository's releases.
+
 ## Reporting a vulnerability
 
 Report it privately from this repository's Security tab (« Report a vulnerability »), not in public.
