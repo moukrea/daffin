@@ -1,14 +1,12 @@
 name: CI
-# Tests one commit of daffin's private source (moukrea/daffin-src), dispatched by hand, once per merge train:
-#   gh workflow run ci.yml --repo moukrea/daffin -f sha=<commit> -f label=<train>
-#   gh run list --repo moukrea/daffin --workflow ci.yml --json displayTitle,conclusion,url
+# A CI test branch's workflow (scripts/publish-public-main.sh --test-branch): the macos job of daffin-src
+# feat/macos-ci alone, tried before its merge so that one macOS runner lists what breaks, without a whole run's
+# runners. Never merged: daffin-src's main keeps the full workflow.
 # It reads the source with two read-only deploy keys: DAFFIN_SRC_READ_KEY (moukrea/daffin-src) and JAUNT_SRC_READ_KEY
 # (moukrea/jaunt-src: the nebul crates Cargo fetches by git). This repository is public, and so are its logs: the
-# source never leaves the runner. No artifact; nothing of the source cached (only crates.io's crates, npm's and
-# Gradle's packages, and tools: never ~/.cargo/git, never a target folder, which a pull request's workflow could read
-# back); compiler diagnostics in short form (where and what, never the source line); the jaunt-src key forgotten once
-# the dependencies are fetched, before anything is installed or built. scripts/check-public.mjs (daffin-src) holds this
-# file to that. It lives in daffin-src as ops/public/.github/workflows/ci.yml and is published from there.
+# source never leaves the runner. No artifact; nothing of the source cached (only crates.io's crates and tools: never
+# ~/.cargo/git, never a target folder); compiler diagnostics in short form (where and what, never the source line);
+# the jaunt-src key forgotten once the dependencies are fetched, before anything is installed or built.
 run-name: CI ${{ inputs.label || 'train' }} ${{ inputs.sha }}
 on:
   workflow_dispatch:
@@ -58,558 +56,13 @@ jobs:
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full commit id (40 lowercase hexadecimal characters)"; exit 1; }
           [[ "$LABEL" =~ ^[A-Za-z0-9._/#:+-]{0,64}$ ]] || { echo "::error::label: letters, digits and ._/#:+- only, 64 at most"; exit 1; }
 
-  # Node's tests, « Licences » against Cargo.lock, what may go public, the catalogue server, the crates' licences.
-  checks:
+  # The macos job of feat/macos-ci, as it is there (blocking here: it is the run's only job).
+  macos:
     needs: guard
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     permissions: {}
-    timeout-minutes: 30
+    timeout-minutes: 150
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: moukrea/daffin-src
-          ref: ${{ inputs.sha }}
-          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
-          persist-credentials: false
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-          restore-keys: cargo-registry-
-      - name: Rust toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
-        env:
-          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
-          key="$RUNNER_TEMP/jaunt_src"
-          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
-          # GitHub's own host key (GET https://api.github.com/meta, ssh_keys).
-          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
-          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
-          cargo fetch --locked
-          (cd apps/daffin/src-tauri && cargo fetch --locked)
-          rm -f "$key"
-          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: always()
-        continue-on-error: true
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          package-manager-cache: false
-      - name: Node's tests (the app's page, scripts/)
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          node --test apps/daffin/tests/*.test.mjs scripts/*.test.mjs
-      - name: « Licences » against Cargo.lock
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          node apps/daffin/scripts/licences.mjs check
-      - name: What may go public (ops/public, ops/pages), and the fonts of the page the app embeds
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          node scripts/check-public.mjs source
-          node scripts/check-public.mjs fonts apps/daffin/ui
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.npm
-          key: npm-${{ hashFiles('server/package-lock.json') }}
-          restore-keys: npm-
-      - name: The catalogue server (vitest, tsc)
-        working-directory: server
-        # vitest's code frames (the test's source around a failure: lines `  12| …`, `   | ^`) are left out of the log.
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          set -o pipefail
-          npm ci --no-audit --no-fund
-          npx vitest run 2>&1 | sed -E '/^[[:space:]]*[0-9]*[[:space:]]*\|/d'
-          npx tsc --noEmit --pretty false -p .
-      - name: The crates' licences (cargo-deny, deny.toml)
-        run: |
-          set -euo pipefail
-          url=https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
-          curl -fsSL "$url" -o "$RUNNER_TEMP/deny.tgz"
-          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  $RUNNER_TEMP/deny.tgz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/deny.tgz" -C "$RUNNER_TEMP" --strip-components=1
-          "$RUNNER_TEMP/cargo-deny" --manifest-path Cargo.toml --config deny.toml --offline --locked check licenses bans
-          "$RUNNER_TEMP/cargo-deny" --manifest-path apps/daffin/src-tauri/Cargo.toml --config deny.toml --offline --locked check licenses bans
-
-  # The host's workspace (the host, its libraries, the stream agent): its tests and clippy, every feature.
-  workspace:
-    needs: guard
-    runs-on: ubuntu-24.04
-    permissions: {}
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: moukrea/daffin-src
-          ref: ${{ inputs.sha }}
-          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
-          persist-credentials: false
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-          restore-keys: cargo-registry-
-      - name: Rust toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
-      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
-        env:
-          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
-          key="$RUNNER_TEMP/jaunt_src"
-          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
-          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
-          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
-          cargo fetch --locked
-          rm -f "$key"
-          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
-      - name: Room on the disk (the runner's .NET and Haskell)
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup && df -h / | tail -1
-      # The tests are built first, with the job's network (no download is left for them); then they run in a network
-      # namespace of their own that has loopback only: a test that reaches any other address fails here (AGENTS.md: never
-      # a live service). The preflight proves that namespace has loopback alone and that a connection out of it fails
-      # at once; a preflight that cannot run stops the job too. sudo makes the namespace, then the tests run as the
-      # runner's user again with its environment (sudo's own variables dropped, its HOME, PATH and user name put back)
-      # and --offline: a download left for them is an error, not a fetch. Windows and macOS have no such namespace: they
-      # rely on the in-code guard only (daffin-host's net.rs, the app's net.rs: loopback-only in test builds).
-      - name: Tests (every feature), built
-        run: cargo test --locked --workspace --all-features --no-run --message-format=short
-      - name: Tests (every feature), with no network but loopback
-        run: |
-          set -euo pipefail
-          sudo --preserve-env unshare --net -- sh -c '
-            set -eu
-            ip link set lo up || { echo "::error::Loopback could not be raised in the tests namespace"; exit 1; }
-            links=$(ip -o link show | wc -l)
-            if [ "$links" != 1 ]; then
-              echo "::error::The tests namespace has $links network interfaces, not loopback alone: the tests do not run"
-              exit 1
-            fi
-            rc=0
-            timeout 5 bash -c "</dev/tcp/1.1.1.1/443" 2>/dev/null || rc=$?
-            if [ "$rc" != 1 ]; then
-              echo "::error::A connection out of the tests namespace did not fail at once (exit $rc, 1 wanted): the tests do not run"
-              exit 1
-            fi
-            exec setpriv --reuid="$1" --regid="$2" --init-groups env -u SUDO_COMMAND -u SUDO_USER -u SUDO_UID -u SUDO_GID \
-              HOME="$3" PATH="$4" USER="$5" LOGNAME="$5" CARGO_NET_OFFLINE=true \
-              cargo test --locked --offline --workspace --all-features --no-fail-fast --message-format=short
-          ' _ "$(id -u)" "$(id -g)" "$HOME" "$PATH" "$(id -un)"
-      - name: Clippy (every target and feature, warnings denied)
-        if: always()
-        run: cargo clippy --locked --workspace --all-targets --all-features --message-format=short -- -D warnings
-
-  # The app's crate (apps/daffin/src-tauri, a workspace of its own) on Linux: its tests and clippy.
-  app:
-    needs: guard
-    runs-on: ubuntu-24.04
-    permissions: {}
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: moukrea/daffin-src
-          ref: ${{ inputs.sha }}
-          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
-          persist-credentials: false
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-          restore-keys: cargo-registry-
-      - name: Rust toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
-      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
-        env:
-          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
-          key="$RUNNER_TEMP/jaunt_src"
-          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
-          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
-          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
-          (cd apps/daffin/src-tauri && cargo fetch --locked)
-          rm -f "$key"
-          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
-      - name: Room on the disk (the runner's .NET and Haskell)
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup && df -h / | tail -1
-      - name: WebKitGTK, GTK, libsoup and libudev (development files)
-        run: |
-          set -euo pipefail
-          # The runner's mirror (azure.archive.ubuntu.com) sometimes does not resolve: every fetch tried 4 times with a
-          # short timeout, a failed index an error (apt-get update says nothing otherwise), and on a failure, or a name
-          # that does not resolve, archive.ubuntu.com in its place, the lists read again and the command once more.
-          apt_get() { sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any "$@"; }
-          apt_archive() {
-            echo "::warning::azure.archive.ubuntu.com failed: archive.ubuntu.com instead"
-            sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i 's#//azure\.archive\.ubuntu\.com/#//archive.ubuntu.com/#g' {} +
-          }
-          apt_try() { apt_get "$@" || { apt_archive; apt_get update -q && apt_get "$@"; }; }
-          getent hosts azure.archive.ubuntu.com > /dev/null || apt_archive
-          apt_try update -q
-          apt_try install -yq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev
-      # As the workspace's: built first, then run with no network but loopback (the same preflight).
-      - name: Tests, built
-        working-directory: apps/daffin/src-tauri
-        run: cargo test --locked --no-run --message-format=short
-      - name: Tests, with no network but loopback
-        working-directory: apps/daffin/src-tauri
-        run: |
-          set -euo pipefail
-          sudo --preserve-env unshare --net -- sh -c '
-            set -eu
-            ip link set lo up || { echo "::error::Loopback could not be raised in the tests namespace"; exit 1; }
-            links=$(ip -o link show | wc -l)
-            if [ "$links" != 1 ]; then
-              echo "::error::The tests namespace has $links network interfaces, not loopback alone: the tests do not run"
-              exit 1
-            fi
-            rc=0
-            timeout 5 bash -c "</dev/tcp/1.1.1.1/443" 2>/dev/null || rc=$?
-            if [ "$rc" != 1 ]; then
-              echo "::error::A connection out of the tests namespace did not fail at once (exit $rc, 1 wanted): the tests do not run"
-              exit 1
-            fi
-            exec setpriv --reuid="$1" --regid="$2" --init-groups env -u SUDO_COMMAND -u SUDO_USER -u SUDO_UID -u SUDO_GID \
-              HOME="$3" PATH="$4" USER="$5" LOGNAME="$5" CARGO_NET_OFFLINE=true \
-              cargo test --locked --offline --no-fail-fast --message-format=short
-          ' _ "$(id -u)" "$(id -g)" "$HOME" "$PATH" "$(id -un)"
-      - name: Clippy (every target, warnings denied)
-        if: always()
-        working-directory: apps/daffin/src-tauri
-        run: cargo clippy --locked --all-targets --message-format=short -- -D warnings
-
-  # The Android app as released (aarch64, release profile), unsigned: the release key stays on fedora1 and Home. Its
-  # fonts checked as the release checks them; the APK itself stays here.
-  android-release:
-    needs: guard
-    runs-on: ubuntu-24.04
-    permissions: {}
-    timeout-minutes: 75
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: moukrea/daffin-src
-          ref: ${{ inputs.sha }}
-          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
-          persist-credentials: false
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-          restore-keys: cargo-registry-
-      - name: Rust toolchain (aarch64 Android)
-        run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" aarch64-linux-android
-      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
-        env:
-          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
-          key="$RUNNER_TEMP/jaunt_src"
-          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
-          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
-          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
-          (cd apps/daffin/src-tauri && cargo fetch --locked)
-          rm -f "$key"
-          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
-      - id: tauri-cli
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-tauri
-          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
-      - name: Tauri's CLI
-        if: steps.tauri-cli.outputs.cache-hit != 'true'
-        run: CARGO_NET_OFFLINE=false cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION"
-      # Saved at once, so that a later failure does not lose it (the other Android job may save it first: no harm).
-      - if: steps.tauri-cli.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        continue-on-error: true
-        with:
-          path: ~/.cargo/bin/cargo-tauri
-          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
-      - id: gradle
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper/dists
-          key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: gradle-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          package-manager-cache: false
-      - name: The APK (aarch64, release, unsigned)
-        working-directory: apps/daffin
-        run: |
-          set -euo pipefail
-          export JAVA_HOME="$JAVA_HOME_21_X64" ANDROID_HOME="$ANDROID_SDK_ROOT"
-          [ -d "$ANDROID_HOME/ndk/$NDK_VERSION" ] || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
-          export NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
-          # The build's own output names source lines (rustc's and Kotlin's): it stays in a file, and the log gets the
-          # diagnostics' first lines and locations, Gradle's verdict, nothing else.
-          apk_log_errors() { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[ew]: |^FAILURE: |^BUILD (SUCCESSFUL|FAILED)|^\* What went wrong|^> |Finished' "$RUNNER_TEMP/apk.log" | head -200 || true; }
-          export GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.configuration-cache=false"
-          cargo tauri android build --apk --ci --target aarch64 > "$RUNNER_TEMP/apk.log" 2>&1 || { apk_log_errors; exit 1; }
-          apk_log_errors | tail -5
-          apk=$(find src-tauri/gen/android/app/build/outputs/apk/universal/release -name "*.apk" | sort | head -1)
-          [ -n "$apk" ] || { echo "::error::no APK"; exit 1; }
-          echo "built $apk: $(stat -c %s "$apk") bytes"
-          echo "APK_PATH=$PWD/$apk" >> "$GITHUB_ENV"
-      - if: steps.gradle.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        continue-on-error: true
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper/dists
-          key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
-      - name: « Licences » lists the Android libraries this build resolved
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          export JAVA_HOME="$JAVA_HOME_21_X64" ANDROID_HOME="$ANDROID_SDK_ROOT"
-          if ! node apps/daffin/scripts/android-licences.mjs check; then
-            # What differs: the libraries' names, versions and licences (the list every APK ships), nothing else.
-            node apps/daffin/scripts/android-licences.mjs write > /dev/null
-            git diff --stat -- apps/daffin/ui/js/licences-android.js
-            git diff --unified=0 -- apps/daffin/ui/js/licences-android.js | grep -E '^[-+][[:space:]]*"(id|version|licence)"' | head -80 || true
-            exit 1
-          fi
-      - name: The APK's fonts (scripts/check-public.mjs)
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          node --input-type=module -e "
-            import { readFileSync } from 'node:fs';
-            import { apkFontErrors } from './scripts/check-public.mjs';
-            const errors = apkFontErrors('the APK', readFileSync(process.env.APK_PATH));
-            if (errors.length) { console.error(errors.join('\n')); process.exit(1); }
-            console.log('the APK holds no font but the allowed one');
-          "
-
-  # The app on an Android emulator (x86_64, debug build, KVM, AOSP image): it installs, starts, stays up with its page, without a
-  # crash or an « isn't responding » dialog.
-  android-emulator:
-    needs: guard
-    runs-on: ubuntu-24.04
-    permissions: {}
-    timeout-minutes: 75
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: moukrea/daffin-src
-          ref: ${{ inputs.sha }}
-          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
-          persist-credentials: false
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-          restore-keys: cargo-registry-
-      - name: Rust toolchain (x86_64 Android)
-        run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" x86_64-linux-android
-      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
-        env:
-          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
-          key="$RUNNER_TEMP/jaunt_src"
-          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
-          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
-          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
-          (cd apps/daffin/src-tauri && cargo fetch --locked)
-          rm -f "$key"
-          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
-      - id: tauri-cli
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-tauri
-          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
-      - name: Tauri's CLI
-        if: steps.tauri-cli.outputs.cache-hit != 'true'
-        run: CARGO_NET_OFFLINE=false cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION"
-      # Saved at once, so that a later failure does not lose it (the other Android job may save it first: no harm).
-      - if: steps.tauri-cli.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        continue-on-error: true
-        with:
-          path: ~/.cargo/bin/cargo-tauri
-          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
-      - id: gradle
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper/dists
-          key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: gradle-
-      - name: The APK (x86_64, debug)
-        working-directory: apps/daffin
-        run: |
-          set -euo pipefail
-          export JAVA_HOME="$JAVA_HOME_21_X64" ANDROID_HOME="$ANDROID_SDK_ROOT"
-          [ -d "$ANDROID_HOME/ndk/$NDK_VERSION" ] || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
-          export NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
-          # The build's own output names source lines (rustc's and Kotlin's): it stays in a file, and the log gets the
-          # diagnostics' first lines and locations, Gradle's verdict, nothing else.
-          apk_log_errors() { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[ew]: |^FAILURE: |^BUILD (SUCCESSFUL|FAILED)|^\* What went wrong|^> |Finished' "$RUNNER_TEMP/apk.log" | head -200 || true; }
-          export GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.configuration-cache=false"
-          cargo tauri android build --debug --apk --ci --target x86_64 > "$RUNNER_TEMP/apk.log" 2>&1 || { apk_log_errors; exit 1; }
-          apk_log_errors | tail -5
-          apk=$(find src-tauri/gen/android/app/build/outputs/apk/universal/debug -name "*.apk" | sort | head -1)
-          [ -n "$apk" ] || { echo "::error::no APK"; exit 1; }
-          echo "built $apk: $(stat -c %s "$apk") bytes"
-          echo "APK_PATH=$PWD/$apk" >> "$GITHUB_ENV"
-      - if: steps.gradle.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        continue-on-error: true
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper/dists
-          key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
-      - id: system-image
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /usr/local/lib/android/sdk/system-images/android-34/default/x86_64
-          key: android-system-image-34-default-x86_64
-      - name: KVM for the emulator
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      # AOSP's image, without Google's services: on the runner's CPU they die now and then (SIGILL), and Android then
-      # kills every app that uses their fonts provider, the WebView's included. Nothing of daffin needs them.
-      - name: The emulator (Android 14, x86_64)
-        run: |
-          set -euo pipefail
-          sdk="$ANDROID_SDK_ROOT"
-          export JAVA_HOME="$JAVA_HOME_21_X64"
-          # One folder for the AVD, which avdmanager writes and the emulator reads (their defaults differ).
-          export ANDROID_AVD_HOME="$RUNNER_TEMP/avd"
-          mkdir -p "$ANDROID_AVD_HOME"
-          # `yes` ends on a broken pipe when sdkmanager stops reading: not a failure. The tools' own output goes to
-          # files, shown when something fails.
-          { yes || true; } | "$sdk/cmdline-tools/latest/bin/sdkmanager" --install emulator platform-tools "platforms;android-34" "system-images;android-34;default;x86_64" > "$RUNNER_TEMP/sdkmanager.log" 2>&1 ||
-            { tail -30 "$RUNNER_TEMP/sdkmanager.log"; echo "::error::sdkmanager failed"; exit 1; }
-          echo no | "$sdk/cmdline-tools/latest/bin/avdmanager" create avd -n ci -k "system-images;android-34;default;x86_64" -d pixel_6 > "$RUNNER_TEMP/avdmanager.log" 2>&1 ||
-            { tail -30 "$RUNNER_TEMP/avdmanager.log"; echo "::error::avdmanager failed"; exit 1; }
-          "$sdk/emulator/emulator" -list-avds
-          nohup "$sdk/emulator/emulator" -avd ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 4096 -accel on > "$RUNNER_TEMP/emulator.log" 2>&1 &
-          emulator=$!
-          adb="$sdk/platform-tools/adb"
-          booted=0
-          for _ in $(seq 1 120); do
-            kill -0 "$emulator" 2>/dev/null || { tail -40 "$RUNNER_TEMP/emulator.log"; echo "::error::the emulator stopped"; exit 1; }
-            [ "$(timeout 10 "$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && { booted=1; break; }
-            sleep 5
-          done
-          [ "$booted" = 1 ] || { tail -40 "$RUNNER_TEMP/emulator.log"; echo "::error::the emulator did not boot in 10 minutes"; exit 1; }
-          "$adb" shell settings put global window_animation_scale 0
-          "$adb" shell settings put global transition_animation_scale 0
-          "$adb" shell settings put global animator_duration_scale 0
-          echo "booted: Android $("$adb" shell getprop ro.build.version.release | tr -d '\r'), after ${SECONDS}s"
-          echo "ABIs: $("$adb" shell getprop ro.product.cpu.abilist | tr -d '\r')"
-          echo "WebView: $("$adb" shell dumpsys webviewupdate | grep -m1 'Current WebView package' | tr -d '\r' | sed 's/^ *//')"
-      - if: steps.system-image.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        continue-on-error: true
-        with:
-          path: /usr/local/lib/android/sdk/system-images/android-34/default/x86_64
-          key: android-system-image-34-default-x86_64
-      - name: The app installs, starts and stays up
-        run: |
-          set -euo pipefail
-          adb="$ANDROID_SDK_ROOT/platform-tools/adb"
-          timeout 300 "$adb" install -r "$APK_PATH"
-          "$adb" logcat -c
-          timeout 120 "$adb" shell am start -W -n one.daffin.app/.MainActivity
-          sleep 45
-          pid=$("$adb" shell pidof one.daffin.app | tr -d '\r' || true)
-          resumed=$("$adb" shell dumpsys activity activities | grep -m1 -E "topResumedActivity|mResumedActivity" | tr -d '\r' || true)
-          echo "pid: ${pid:-none}; resumed: $resumed"
-          "$adb" logcat -d > "$RUNNER_TEMP/logcat.log" || true
-          "$adb" logcat -d -b crash >> "$RUNNER_TEMP/logcat.log" || true
-          # daffin's own crashes and « isn't responding » only: a Java exception, a native signal, an ANR.
-          grep -E "Process: one\.daffin\.app|pid [0-9]+ \(one\.daffin\.app\)|ANR in one\.daffin\.app" "$RUNNER_TEMP/logcat.log" > "$RUNNER_TEMP/fatal.log" || true
-          fail=0
-          [ -n "$pid" ] || { echo "::error::the app is not running"; fail=1; }
-          echo "$resumed" | grep "one.daffin.app/" >/dev/null || { echo "::error::the app is not the resumed activity"; fail=1; }
-          if [ -s "$RUNNER_TEMP/fatal.log" ]; then echo "::error::a crash or an ANR"; head -20 "$RUNNER_TEMP/fatal.log"; fail=1; fi
-          if [ "$fail" = 1 ]; then
-            # What Android and the app logged about it: messages, never source.
-            grep -E "one\.daffin\.app|RustStdoutStderr|AndroidRuntime|Tauri" "$RUNNER_TEMP/logcat.log" | grep -v "AppsFilter" | tail -60 || true
-          fi
-          exit $fail
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          package-manager-cache: false
-      # The new code's updater, end to end (apps/daffin/scripts/ci-device-checks.sh): two debug builds pointed at a test
-      # release site the runner serves (127.0.0.1, the emulator's 10.0.2.2), the older installed, its banner and
-      # « Installer », Android's « Update », then the newer one installed. It prints its verdicts only.
-      - name: The update, as a phone gets it
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          set -euo pipefail
-          script=apps/daffin/scripts/ci-device-checks.sh
-          [ -f "$script" ] || { echo "no update check in this commit"; exit 0; }
-          export JAVA_HOME="$JAVA_HOME_21_X64" ANDROID_HOME="$ANDROID_SDK_ROOT" NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
-          export GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.configuration-cache=false"
-          export PATH="$ANDROID_SDK_ROOT/platform-tools:$PATH"
-          serial=$(adb devices | awk 'NR > 1 && $1 ~ /^emulator-/ && $2 == "device" { print $1; exit }')
-          [ -n "$serial" ] || { echo "::error::no emulator"; exit 1; }
-          # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
-          G="node scripts/ci-skips.mjs android-emulator --"; [ -f scripts/ci-skips.mjs ] || G=""
-          $G bash "$script" update --serial "$serial"
-
-  # Windows (MSVC): the host's workspace and the app's crate, clippy and tests, and the host and the stream agent built as
-  # they ship (kept nowhere: no artifact). Every step runs even after one fails, so that one run says all that breaks.
-  windows:
-    needs: guard
-    runs-on: windows-2025
-    permissions: {}
-    timeout-minutes: 90
-    defaults:
-      run:
-        shell: bash
-    steps:
-      # The files as Linux has them (the tests' fixtures and include_str!s), not converted to CRLF by Git for Windows.
-      - name: Line endings as committed
-        run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: moukrea/daffin-src
@@ -622,475 +75,18 @@ jobs:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
-          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-          restore-keys: windows-cargo-registry-
-      - name: Rust toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
+          key: macos-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: macos-cargo-registry-
+      - name: Rust toolchain (the runner's own target, aarch64-apple-darwin)
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          [ "$host" = aarch64-apple-darwin ] || { echo "::error::this runner builds for $host, not aarch64-apple-darwin"; exit 1; }
+          echo "building for $host"
+          df -h / | tail -1
       - id: deps
         name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
-        env:
-          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
-          # Unix-style paths: Git's sh reads GIT_SSH_COMMAND, where a Windows path's backslashes would be escapes.
-          tmp=$(cygpath -u "$RUNNER_TEMP")
-          key="$tmp/jaunt_src"
-          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
-          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$tmp/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts"
-          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
-          cargo fetch --locked
-          (cd apps/daffin/src-tauri && cargo fetch --locked)
-          rm -f "$key"
-          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
-      - if: steps.registry.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        continue-on-error: true
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-      - name: "Clippy: the workspace (every target and feature, warnings denied)"
-        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
-        run: cargo clippy --locked --workspace --all-features --all-targets --message-format=short -- -D warnings
-      - name: "Tests: the workspace"
-        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
-        run: cargo test --locked --workspace --no-fail-fast --message-format=short
-      - name: The host and the stream agent, as released
-        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
-        run: cargo build --locked --release -p daffin-host -p daffin-stream-agent --message-format=short
-      - name: "Clippy: the app's crate (every target, warnings denied)"
-        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
-        working-directory: apps/daffin/src-tauri
-        run: cargo clippy --locked --all-targets --message-format=short -- -D warnings
-      - name: "Tests: the app's crate"
-        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
-        working-directory: apps/daffin/src-tauri
-        run: cargo test --locked --no-fail-fast --message-format=short
-
-  # The Windows installer (NSIS) as scripts/windows-package.sh makes it (daffin-host beside the app), kept nowhere: it
-  # must carry THIRD-PARTY-LICENSES, the notices of the app and the host for Windows (licences.mjs installer), never the
-  # placeholder build.rs writes for cargo.
-  windows-installer:
-    needs: guard
-    runs-on: windows-2025
-    permissions: {}
-    timeout-minutes: 90
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Line endings as committed
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: moukrea/daffin-src
-          ref: ${{ inputs.sha }}
-          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
-          persist-credentials: false
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-          restore-keys: windows-cargo-registry-
-      - name: Rust toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
-        env:
-          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
-          tmp=$(cygpath -u "$RUNNER_TEMP")
-          key="$tmp/jaunt_src"
-          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
-          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$tmp/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts"
-          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
-          # The host's workspace too, when the installer carries daffin-host (apps/daffin/scripts/windows-package.sh).
-          if [ -f apps/daffin/scripts/windows-package.sh ]; then cargo fetch --locked; fi
-          (cd apps/daffin/src-tauri && cargo fetch --locked)
-          rm -f "$key"
-          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
-      - id: tauri-cli
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-tauri.exe
-          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
-      - name: Tauri's CLI
-        if: steps.tauri-cli.outputs.cache-hit != 'true'
-        run: CARGO_NET_OFFLINE=false cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION"
-      - if: steps.tauri-cli.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        continue-on-error: true
-        with:
-          path: ~/.cargo/bin/cargo-tauri.exe
-          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
-      # licences.mjs bundle (the beforeBundleCommand) runs the licence gate first.
-      - name: cargo-deny
-        run: |
-          set -euo pipefail
-          tmp=$(cygpath -u "$RUNNER_TEMP")
-          url=https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-pc-windows-msvc.tar.gz
-          curl -fsSL "$url" -o "$tmp/deny.tgz"
-          echo "975a22143262fd27476d19ee00c7af67978426e40e1dee94eed6bbade1cf87dc  $tmp/deny.tgz" | sha256sum -c -
-          mkdir -p "$tmp/deny"
-          tar -xzf "$tmp/deny.tgz" -C "$tmp/deny" --strip-components=1
-          cp "$tmp/deny/cargo-deny.exe" ~/.cargo/bin/
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          package-manager-cache: false
-      - name: The installer (NSIS)
-        working-directory: apps/daffin
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          set -euo pipefail
-          # The build's own output names source lines (rustc's): it stays in a file, and the log gets the diagnostics'
-          # first lines and locations, the CLI's steps and the licences script's lines, nothing else.
-          bundle_log() { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[[:space:]]*(Error|Warn|Info|Running|Finished|Bundling) |^licences: |^check-public: ' "$RUNNER_TEMP/bundle.log" | head -200 || true; }
-          # The installer as it ships: daffin-host beside the app (scripts/windows-package.sh, the agent in it), per user,
-          # its hooks; a commit from before that script, the app alone.
-          if [ -f scripts/windows-package.sh ]; then
-            out="$(cygpath -u "$RUNNER_TEMP")/windows-release"
-            bash scripts/windows-package.sh --out "$out" > "$RUNNER_TEMP/bundle.log" 2>&1 || { bundle_log; exit 1; }
-            bundle_log | tail -8
-            exe=$(find "$out" -name "*-setup.exe" | sort | head -1)
-            echo DAFFIN_BUNDLE_BINARIES=app,host >> "$GITHUB_ENV"
-          else
-            cargo tauri build --bundles nsis --ci > "$RUNNER_TEMP/bundle.log" 2>&1 || { bundle_log; exit 1; }
-            bundle_log | tail -8
-            exe=$(find src-tauri/target/release/bundle/nsis -name "*-setup.exe" | sort | head -1)
-          fi
-          [ -n "$exe" ] || { echo "::error::no installer"; exit 1; }
-          echo "built $exe: $(stat -c %s "$exe") bytes"
-          case "$exe" in /*) ;; *) exe=$PWD/$exe ;; esac
-          echo "INSTALLER=$exe" >> "$GITHUB_ENV"
-      - name: The installer carries the notices, never the placeholder
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          node apps/daffin/scripts/licences.mjs installer "$INSTALLER"
-      # The refusal itself, on a real installer: as if bundle had not run, build.rs's placeholder in place of the notices,
-      # the same build bundled again without the beforeBundleCommand.
-      - name: An installer that carries the placeholder is refused
-        working-directory: apps/daffin
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          set -euo pipefail
-          node --input-type=module -e "import { writeFileSync } from 'node:fs'; import { NOTICES_PLACEHOLDER } from './scripts/licences.mjs'; writeFileSync('src-tauri/target/licences/THIRD-PARTY-LICENSES', NOTICES_PLACEHOLDER + '\n');"
-          # The installer this bundle writes, alone in its folder (windows-package.sh's was copied out of it, $INSTALLER).
-          rm -rf src-tauri/target/release/bundle/nsis
-          cargo tauri bundle --bundles nsis --ci --config '{"build":{"beforeBundleCommand":null}}' > "$RUNNER_TEMP/placeholder.log" 2>&1 ||
-            { grep -E '^[[:space:]]*(Error|Warn) ' "$RUNNER_TEMP/placeholder.log" | head -20 || true; exit 1; }
-          placeholder=$(find src-tauri/target/release/bundle/nsis -name "*-setup.exe" | sort | head -1)
-          [ -n "$placeholder" ] || { echo "::error::no installer bundled with the placeholder"; exit 1; }
-          if node scripts/licences.mjs installer "$placeholder"; then echo "::error::an installer carrying the placeholder passed"; exit 1; fi
-          echo "refused, as it must be"
-
-  # A release run only (the `release` input): the Windows installer of that desktop release, built as the windows-installer
-  # job builds it (apps/daffin/scripts/windows-package.sh) from the commit tested, then uploaded with its SHA-256 to that
-  # release of this repository as a DRAFT, which only the repository's owner sees. The only job whose token writes, and
-  # only that (scripts/check-public.mjs RELEASE_JOB): the draft goes public through desktop-release.sh, on the owner's
-  # yes. The build's output stays in a file; the log gets its diagnostics' first lines and the CLI's steps.
-  windows-release:
-    needs: guard
-    if: ${{ inputs.release != '' }}
-    runs-on: windows-2025
-    permissions:
-      contents: write
-    timeout-minutes: 90
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Line endings as committed
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: moukrea/daffin-src
-          ref: ${{ inputs.sha }}
-          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
-          persist-credentials: false
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-          restore-keys: windows-cargo-registry-
-      - name: Rust toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
-        env:
-          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
-          tmp=$(cygpath -u "$RUNNER_TEMP")
-          key="$tmp/jaunt_src"
-          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
-          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$tmp/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts"
-          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
-          # The host's workspace too, when the installer carries daffin-host (apps/daffin/scripts/windows-package.sh).
-          if [ -f apps/daffin/scripts/windows-package.sh ]; then cargo fetch --locked; fi
-          (cd apps/daffin/src-tauri && cargo fetch --locked)
-          rm -f "$key"
-          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
-      - id: tauri-cli
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-tauri.exe
-          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
-      - name: Tauri's CLI
-        if: steps.tauri-cli.outputs.cache-hit != 'true'
-        run: CARGO_NET_OFFLINE=false cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION"
-      - if: steps.tauri-cli.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        continue-on-error: true
-        with:
-          path: ~/.cargo/bin/cargo-tauri.exe
-          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
-      # licences.mjs bundle (the beforeBundleCommand) runs the licence gate first.
-      - name: cargo-deny
-        run: |
-          set -euo pipefail
-          tmp=$(cygpath -u "$RUNNER_TEMP")
-          url=https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-pc-windows-msvc.tar.gz
-          curl -fsSL "$url" -o "$tmp/deny.tgz"
-          echo "975a22143262fd27476d19ee00c7af67978426e40e1dee94eed6bbade1cf87dc  $tmp/deny.tgz" | sha256sum -c -
-          mkdir -p "$tmp/deny"
-          tar -xzf "$tmp/deny.tgz" -C "$tmp/deny" --strip-components=1
-          cp "$tmp/deny/cargo-deny.exe" ~/.cargo/bin/
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          package-manager-cache: false
-      - name: The release's installer and its SHA-256
-        working-directory: apps/daffin
-        env:
-          RELEASE: ${{ inputs.release }}
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          set -euo pipefail
-          [[ "$RELEASE" =~ ^desktop-v(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]?)\.(0|[1-9][0-9]?)-([1-9][0-9]{0,2})$ ]] || { echo "::error::release must be a desktop-v<version>-<build> tag"; exit 1; }
-          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          [ "desktop-v$version-${RELEASE##*-}" = "$RELEASE" ] || { echo "::error::$RELEASE is not tauri.conf.json's version $version"; exit 1; }
-          out=$(cygpath -u "$RUNNER_TEMP")/release
-          mkdir -p "$out"
-          bash scripts/windows-package.sh --build "${RELEASE##*-}" --out "$out/build" > "$RUNNER_TEMP/package.log" 2>&1 ||
-            { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[[:space:]]*(Error|Warn|Info|Running|Finished|Bundling) |^licences: |^windows-package: ' "$RUNNER_TEMP/package.log" | head -200 || true; exit 1; }
-          exe="$out/build/daffin-$RELEASE-x86_64-setup.exe"
-          [ -f "$exe" ] || { echo "::error::windows-package.sh made no daffin-$RELEASE-x86_64-setup.exe"; exit 1; }
-          # The notices of what it carries (the app and daffin-host), never build.rs's placeholder.
-          DAFFIN_BUNDLE_BINARIES=app,host node scripts/licences.mjs installer "$exe"
-          cp "$exe" "$out/daffin-$RELEASE-x86_64.exe"
-          # « <hash>  <name> » as on Linux (Git Bash's sha256sum writes « <hash> *<name> »).
-          printf '%s  %s\n' "$(sha256sum < "$out/daffin-$RELEASE-x86_64.exe" | cut -c1-64)" "daffin-$RELEASE-x86_64.exe" > "$out/SHA256SUMS.windows"
-          echo "built daffin-$RELEASE-x86_64.exe: $(stat -c %s "$out/daffin-$RELEASE-x86_64.exe") bytes, $(cut -c1-64 "$out/SHA256SUMS.windows")"
-      - name: To the release, as a draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE: ${{ inputs.release }}
-        run: |
-          set -euo pipefail
-          [[ "$RELEASE" =~ ^desktop-v(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]?)\.(0|[1-9][0-9]?)-([1-9][0-9]{0,2})$ ]] || { echo "::error::release must be a desktop-v<version>-<build> tag"; exit 1; }
-          out=$(cygpath -u "$RUNNER_TEMP")/release
-          state=$(gh release view "$RELEASE" --repo moukrea/daffin --json isDraft --jq .isDraft 2>/dev/null || echo none)
-          [ "$state" != none ] || gh release create "$RELEASE" --repo moukrea/daffin --draft --title "$RELEASE" --notes ""
-          [ "$(gh release view "$RELEASE" --repo moukrea/daffin --json isDraft --jq .isDraft)" = true ] || { echo "::error::$RELEASE is not a draft: this job uploads to a draft only"; exit 1; }
-          gh release upload "$RELEASE" "$out/daffin-$RELEASE-x86_64.exe" "$out/SHA256SUMS.windows" --repo moukrea/daffin --clobber
-          echo "uploaded to the draft $RELEASE"
-
-  # windows-smoke (d049, lot 20), NON-BLOCKING until lot 20 is merged: the Windows app and its host on a real
-  # Windows (apps/daffin/scripts/ci-windows-smoke.sh: fixed words only, also in the run's summary). Three installers of
-  # the commit made for a test update site on this runner (debug assertions: never a release's); a made-up game per
-  # Windows scanner (files, a .GamingRoot, registry keys under a test root of HKCU); -901 installed silently for this
-  # user, daffin.exe started with WebView2's DevTools on a local port and its first screen named; « Partager » (its
-  # button, else its command) and the host's Run entry; host.info on its pipe and the fixtures in its scan; the agent's
-  # encoders measured (Media Foundation's software transform, then Cisco's OpenH264); a Windows.Graphics.Capture open
-  # tried; an update to -902, then one to -903 rolled back; then all closed, uninstalled with no Run entry left, and the
-  # fixtures removed.
-  windows-smoke:
-    needs: guard
-    runs-on: windows-2025
-    permissions: {}
-    timeout-minutes: 150
-    # Non-blocking until lot 20 is merged: a failure here never fails the run, and summary does not wait for it.
-    continue-on-error: true
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Line endings as committed
-        run: git config --global core.autocrlf false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: moukrea/daffin-src
-          ref: ${{ inputs.sha }}
-          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
-          persist-credentials: false
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-          restore-keys: windows-cargo-registry-
-      - name: Rust toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
-        env:
-          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
-          tmp=$(cygpath -u "$RUNNER_TEMP")
-          key="$tmp/jaunt_src"
-          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
-          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$tmp/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts"
-          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
-          # The host's workspace too, when the installer carries daffin-host (apps/daffin/scripts/windows-package.sh).
-          if [ -f apps/daffin/scripts/windows-package.sh ]; then cargo fetch --locked; fi
-          (cd apps/daffin/src-tauri && cargo fetch --locked)
-          rm -f "$key"
-          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
-      - id: tauri-cli
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-tauri.exe
-          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
-      - name: Tauri's CLI
-        if: steps.tauri-cli.outputs.cache-hit != 'true'
-        run: CARGO_NET_OFFLINE=false cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION"
-      - if: steps.tauri-cli.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        continue-on-error: true
-        with:
-          path: ~/.cargo/bin/cargo-tauri.exe
-          key: tauri-cli-windows-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
-      # licences.mjs bundle (the beforeBundleCommand) runs the licence gate first.
-      - name: cargo-deny
-        run: |
-          set -euo pipefail
-          tmp=$(cygpath -u "$RUNNER_TEMP")
-          url=https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-pc-windows-msvc.tar.gz
-          curl -fsSL "$url" -o "$tmp/deny.tgz"
-          echo "975a22143262fd27476d19ee00c7af67978426e40e1dee94eed6bbade1cf87dc  $tmp/deny.tgz" | sha256sum -c -
-          mkdir -p "$tmp/deny"
-          tar -xzf "$tmp/deny.tgz" -C "$tmp/deny" --strip-components=1
-          cp "$tmp/deny/cargo-deny.exe" ~/.cargo/bin/
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          package-manager-cache: false
-      - name: Three test installers (-901, -902, and -903 whose host never answers), for the update site
-        continue-on-error: true
-        timeout-minutes: 100
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          bash apps/daffin/scripts/ci-windows-smoke.sh builds
-      # One step: GitHub Actions ends a step's leftover processes, and the app and the host must outlive each check.
-      - name: "The checks: fixtures, -901 installed and read, « Partager », the host's pipe and scan, the encoders, WGC (tried), the update and its rollback"
-        continue-on-error: true
-        timeout-minutes: 75
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
-          G="node scripts/ci-skips.mjs windows-smoke --"; [ -f scripts/ci-skips.mjs ] || G=""
-          $G bash apps/daffin/scripts/ci-windows-smoke.sh checks
-      - name: The app closed and uninstalled
-        if: always()
-        continue-on-error: true
-        timeout-minutes: 10
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          bash apps/daffin/scripts/ci-windows-smoke.sh clean
-
-  # The office bench (apps/daffin/scripts/office-bench): the owner's office (out only TCP 443 and UDP 3478, 19302-19309)
-  # and Home's Freebox (UPnP maps every port, but delivers nothing to its 443) in network namespaces, no root: what
-  # gets through and what does not, as measured on 2026-10-23. It prints its checks only.
-  office-bench:
-    needs: guard
-    runs-on: ubuntu-24.04
-    permissions: {}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: moukrea/daffin-src
-          ref: ${{ inputs.sha }}
-          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
-          persist-credentials: false
-      # nft and miniupnpd for the bench's boxes: never started as services on the runner's own network (policy-rc.d
-      # refuses every service start during the install).
-      - name: Network tools for the bench
-        run: |
-          printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
-          sudo chmod 755 /usr/sbin/policy-rc.d
-          # The runner's mirror (azure.archive.ubuntu.com) sometimes does not resolve: every fetch tried 4 times with a
-          # short timeout, a failed index an error (apt-get update says nothing otherwise), and on a failure, or a name
-          # that does not resolve, archive.ubuntu.com in its place, the lists read again and the command once more.
-          apt_get() { sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any "$@"; }
-          apt_archive() {
-            echo "::warning::azure.archive.ubuntu.com failed: archive.ubuntu.com instead"
-            sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i 's#//azure\.archive\.ubuntu\.com/#//archive.ubuntu.com/#g' {} +
-          }
-          apt_try() { apt_get "$@" || { apt_archive; apt_get update -q && apt_get "$@"; }; }
-          getent hosts azure.archive.ubuntu.com > /dev/null || apt_archive
-          apt_try update -q
-          apt_try install -y -q --no-install-recommends nftables miniupnpd-nftables
-          sudo rm -f /usr/sbin/policy-rc.d
-          if systemctl is-active --quiet miniupnpd; then sudo systemctl stop miniupnpd; fi
-      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; the bench runs unprivileged inside one.
-      - name: User namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: The office and the Freebox
-        env:
-          DAFFIN_BENCH_REQUIRED: '1'
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          if [ ! -f apps/daffin/scripts/office-bench/bench.py ]; then echo "no office bench in this commit"; exit 0; fi
-          # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
-          G="node scripts/ci-skips.mjs office-bench --"; [ -f scripts/ci-skips.mjs ] || G=""
-          $G python3 apps/daffin/scripts/office-bench/bench.py check
-          # The same with a symmetric office NAT (a phone on a carrier network), where the bench has the option.
-          if grep -q -- '--office-nat' apps/daffin/scripts/office-bench/bench.py; then
-            $G python3 apps/daffin/scripts/office-bench/bench.py check --office-nat symmetric
-          fi
-
-  # Playing away from home, end to end (apps/daffin/scripts/away_stream_e2e.py), on the office bench: the app paired at
-  # home streams from the office through the Freebox's mapped ports, the relay carrying the signalling only; the office's
-  # NAT as measured, then symmetric. Route A (no GPU here: mutter headless on Mesa's software renderer, WebKitGTK's
-  # WebCodecs on GStreamer's decoder, the agent's H.264 from OpenH264 built from source: a test build, never shipped).
-  # It prints its counts and checks only (report.json stays on the runner).
-  away-e2e:
-    needs: guard
-    runs-on: ubuntu-24.04
-    permissions: {}
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: moukrea/daffin-src
-          ref: ${{ inputs.sha }}
-          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
-          persist-credentials: false
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
-          restore-keys: cargo-registry-
-      - name: Rust toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
         env:
           JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
         run: |
@@ -1105,113 +101,98 @@ jobs:
           (cd apps/daffin/src-tauri && cargo fetch --locked)
           rm -f "$key"
           echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
-      - name: Room on the disk (the runner's .NET and Haskell)
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup && df -h / | tail -1
-      # The app's build files; the bench's boxes (nft, miniupnpd: never started as services on the runner's own network,
-      # policy-rc.d refuses every service start during the install); the private display (mutter on Mesa's software
-      # renderer, in its own D-Bus session); WebKitGTK's H.264 decoder (GStreamer's libav).
-      - name: Build files, the bench's tools, the display, the decoder
-        run: |
-          printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
-          sudo chmod 755 /usr/sbin/policy-rc.d
-          sudo apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev nftables miniupnpd-nftables mutter dbus dbus-user-session libgl1-mesa-dri libegl-mesa0 gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
-          sudo rm -f /usr/sbin/policy-rc.d
-          if systemctl is-active --quiet miniupnpd; then sudo systemctl stop miniupnpd; fi
-      - name: User namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: The host and its agent (release, OpenH264 from source)
-        run: cargo build --locked --release -p daffin-host -p daffin-stream-agent --features daffin-stream-agent/bundled-openh264 --message-format=short
-      - name: The app (debug, its relay the bench's)
+      - if: steps.registry.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: macos-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+      - name: "Clippy: the workspace (every target and feature, warnings denied)"
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: cargo clippy --locked --workspace --all-features --all-targets --message-format=short -- -D warnings
+      # No network namespace on macOS: the tests rely on the in-code guard (daffin-host's net.rs, the app's net.rs).
+      - name: "Tests: the workspace"
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: cargo test --locked --workspace --no-fail-fast --message-format=short
+      - name: The host and the stream agent, as they would ship
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: cargo build --locked --release -p daffin-host -p daffin-stream-agent --message-format=short
+      # The workspace's build out of the way before the app's: one runner's disk for both.
+      - name: Room on the disk (the workspace's target folder)
+        if: ${{ !cancelled() }}
+        run: rm -rf target && df -h / | tail -1
+      - name: "Clippy: the app's crate (every target, warnings denied)"
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
         working-directory: apps/daffin/src-tauri
-        run: DAFFIN_AWAY_RELAY=ws://127.0.0.1:47443 cargo build --locked --message-format=short
-      # Route A (the page decodes with the system's decoders), 640x360, 120 frames: OpenH264 in software on 4 cores. The
-      # e2e prints one JSON line whatever happens (counts, checks, or what failed: its type, message and script:line).
-      - name: Home, then the office (the NAT as measured, then symmetric)
-        env:
-          DAFFIN_BENCH_REQUIRED: '1'
-          # No GPU here: Mesa's software renderer for mutter.
-          LIBGL_ALWAYS_SOFTWARE: '1'
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          set -euo pipefail
-          if [ ! -f apps/daffin/scripts/away_stream_e2e.py ]; then echo "no away e2e in this commit"; exit 0; fi
-          # WebKitGTK without compositing: on Mesa's software renderer its compositor stalls the page.
-          # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
-          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
-          e2e() { $G python3 apps/daffin/scripts/away_stream_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --route a --size 640x360 --frames 120 --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 "$@"; }
-          e2e --out "$RUNNER_TEMP/away"
-          e2e --out "$RUNNER_TEMP/away-symmetric" --office-nat symmetric
-      # Every machine at once (lot 23): the same app with two test hosts, one tile for a game both have, the office
-      # stopped and back, the app started again with both away (apps/daffin/scripts/two_machines_e2e.py). Nothing is
-      # streamed; the e2e prints one JSON line whatever happens (checks, or what failed).
-      - name: Two machines at once
-        if: ${{ !cancelled() }}
-        env:
-          LIBGL_ALWAYS_SOFTWARE: '1'
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          set -euo pipefail
-          if [ ! -f apps/daffin/scripts/two_machines_e2e.py ]; then echo "no two-machine e2e in this commit"; exit 0; fi
-          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
-          $G python3 apps/daffin/scripts/two_machines_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 --out "$RUNNER_TEMP/two"
-      # The page's decoder with WebKitGTK's hardware acceleration off on WebKitGTK 2.54, Fedora's, which the Linux
-      # packages meet there (apps/daffin/scripts/ci-webkit-noaccel.sh, in a Fedora container, the checkout read-only):
-      # 2.54 aborted the web process at the first VideoDecoder without a shared GL display (desktop-v0.0.1-2); the
-      # runner's own WebKitGTK (Ubuntu 24.04's 2.52, the away e2e's noaccel phase above) never had that code. The
-      # owner, 11 Nov 2026: a fixed step of every desktop release.
-      - name: The page's decoder with acceleration off, on WebKitGTK 2.54 (Fedora)
-        if: ${{ !cancelled() }}
-        run: |
-          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          set -euo pipefail
-          if [ ! -f apps/daffin/scripts/ci-webkit-noaccel.sh ]; then echo "no WebKitGTK 2.54 check in this commit"; exit 0; fi
-          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
-          $G docker run --rm -v "$PWD:/src:ro" registry.fedoraproject.org/fedora:43 bash /src/apps/daffin/scripts/ci-webkit-noaccel.sh /src
-
-  # The built-in player's tools (apps/daffin/player/tools): their tests. The ones that need the cores built (emcc)
-  # or Playwright skip themselves.
-  player-tools:
-    needs: guard
-    runs-on: ubuntu-24.04
-    permissions: {}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        run: cargo clippy --locked --all-targets --message-format=short -- -D warnings
+      - name: "Tests: the app's crate"
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        working-directory: apps/daffin/src-tauri
+        run: cargo test --locked --no-fail-fast --message-format=short
+      - id: tauri-cli
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          repository: moukrea/daffin-src
-          ref: ${{ inputs.sha }}
-          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-macos-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      - id: tauri-install
+        name: Tauri's CLI
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' && steps.tauri-cli.outputs.cache-hit != 'true' }}
+        run: CARGO_NET_OFFLINE=false cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION"
+      - if: ${{ !cancelled() && steps.tauri-install.outcome == 'success' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
         with:
-          python-version: '3.13'
-      - name: pytest
-        working-directory: apps/daffin/player
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-macos-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      # licences.mjs bundle (the beforeBundleCommand) runs the licence gate first.
+      - id: deny
+        name: cargo-deny
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          url=https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-aarch64-apple-darwin.tar.gz
+          curl -fsSL "$url" -o "$RUNNER_TEMP/deny.tgz"
+          echo "fe67d82a10d8597a3549364cb733a3f9cc1bfff9031b7ae46384a9f2a72090c3  $RUNNER_TEMP/deny.tgz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/deny"
+          tar -xzf "$RUNNER_TEMP/deny.tgz" -C "$RUNNER_TEMP/deny" --strip-components=1
+          cp "$RUNNER_TEMP/deny/cargo-deny" ~/.cargo/bin/
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      # The app alone (its host beside it is a later lot). The build's own output stays in a file; the log gets the
+      # diagnostics' first lines and locations, and the CLI's steps.
+      - name: The .app and the .dmg, signed ad hoc
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' && steps.deny.outcome == 'success' }}
+        working-directory: apps/daffin
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          python -m pip install --quiet 'pytest==8.4.2'
-          python -m pytest -q --tb=line tools/
-
-  # One line per job: what the train reads (gh run view --repo moukrea/daffin <run>).
-  summary:
-    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows, windows-installer, office-bench, away-e2e]
-    if: always()
-    runs-on: ubuntu-24.04
-    permissions: {}
-    timeout-minutes: 2
-    steps:
-      - name: Results
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-          SHA: ${{ inputs.sha }}
+          set -euo pipefail
+          bundle_log() { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[[:space:]]*(Error|Warn|Info|Running|Finished|Bundling|Signing) |^licences: ' "$RUNNER_TEMP/bundle.log" | head -200 || true; }
+          cargo tauri build --bundles app,dmg --ci > "$RUNNER_TEMP/bundle.log" 2>&1 || { bundle_log; exit 1; }
+          bundle_log | tail -12
+          app=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)
+          dmg=$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' | head -1)
+          [ -n "$app" ] || { echo "::error::no .app"; exit 1; }
+          [ -n "$dmg" ] || { echo "::error::no .dmg"; exit 1; }
+          echo "built $app ($(du -sk "$app" | cut -f1) KiB) and $dmg ($(wc -c < "$dmg" | tr -d ' ') bytes)"
+          # Signed ad hoc, the whole bundle: its signature verifies, and it names no team (no certificate).
+          codesign --verify --deep --strict "$app" 2>&1
+          sig=$(codesign -dv "$app" 2>&1)
+          printf '%s\n' "$sig" | grep -E '^(Identifier|Format|Signature|TeamIdentifier)=' || true
+          printf '%s\n' "$sig" | grep -x 'Signature=adhoc' > /dev/null || { echo "::error::the app is not signed ad hoc"; exit 1; }
+          hdiutil verify "$dmg" > /dev/null 2>&1 || { echo "::error::the .dmg does not verify"; exit 1; }
+          echo "the .dmg verifies"
+          echo "APP=$PWD/$app" >> "$GITHUB_ENV"
+      - name: The app carries the notices of daffin for macOS, never the placeholder
+        if: ${{ !cancelled() && env.APP != '' }}
+        working-directory: apps/daffin
         run: |
-          {
-            echo "### daffin-src ${SHA:0:12}"
-            echo
-            echo "| Job | Result |"
-            echo "|---|---|"
-            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<< "$NEEDS"
-          } >> "$GITHUB_STEP_SUMMARY"
-          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
-          [ "$(jq '[.[] | select(.result != "success")] | length' <<< "$NEEDS")" = 0 ]
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          node scripts/licences.mjs notices macos "$RUNNER_TEMP/notices.macos" --binaries app
+          cmp -s "$RUNNER_TEMP/notices.macos" "$APP/Contents/Resources/THIRD-PARTY-LICENSES" || { echo "::error::the app's THIRD-PARTY-LICENSES is not what licences.mjs writes for macOS"; exit 1; }
+          echo "the app carries the notices of daffin for macOS"
