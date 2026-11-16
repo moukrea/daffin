@@ -375,8 +375,9 @@ jobs:
           [ -d "$ANDROID_HOME/ndk/$NDK_VERSION" ] || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
           export NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
           # The build's own output names source lines (rustc's and Kotlin's): it stays in a file, and the log gets the
-          # diagnostics' first lines and locations, Gradle's verdict, nothing else.
-          apk_log_errors() { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[ew]: |^FAILURE: |^BUILD (SUCCESSFUL|FAILED)|^\* What went wrong|^> |Finished' "$RUNNER_TEMP/apk.log" | head -200 || true; }
+          # diagnostics' first lines (indented too: Gradle and Tauri pass cargo's on) and locations, Tauri's own errors,
+          # Gradle's verdict, nothing else.
+          apk_log_errors() { grep -E '^[[:space:]]*(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[ew]: |^FAILURE: |^BUILD (SUCCESSFUL|FAILED)|^\* What went wrong|^> |^[[:space:]]*(Error|Warn) |Finished' "$RUNNER_TEMP/apk.log" | head -200 || true; }
           export GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.configuration-cache=false"
           cargo tauri android build --apk --ci --target aarch64 > "$RUNNER_TEMP/apk.log" 2>&1 || { apk_log_errors; exit 1; }
           apk_log_errors | tail -5
@@ -484,8 +485,9 @@ jobs:
           [ -d "$ANDROID_HOME/ndk/$NDK_VERSION" ] || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
           export NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
           # The build's own output names source lines (rustc's and Kotlin's): it stays in a file, and the log gets the
-          # diagnostics' first lines and locations, Gradle's verdict, nothing else.
-          apk_log_errors() { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[ew]: |^FAILURE: |^BUILD (SUCCESSFUL|FAILED)|^\* What went wrong|^> |Finished' "$RUNNER_TEMP/apk.log" | head -200 || true; }
+          # diagnostics' first lines (indented too: Gradle and Tauri pass cargo's on) and locations, Tauri's own errors,
+          # Gradle's verdict, nothing else.
+          apk_log_errors() { grep -E '^[[:space:]]*(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[ew]: |^FAILURE: |^BUILD (SUCCESSFUL|FAILED)|^\* What went wrong|^> |^[[:space:]]*(Error|Warn) |Finished' "$RUNNER_TEMP/apk.log" | head -200 || true; }
           export GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.configuration-cache=false"
           cargo tauri android build --debug --apk --ci --target x86_64 > "$RUNNER_TEMP/apk.log" 2>&1 || { apk_log_errors; exit 1; }
           apk_log_errors | tail -5
@@ -915,7 +917,8 @@ jobs:
   # button, else its command) and the host's Run entry; host.info on its pipe and the fixtures in its scan; the agent's
   # encoders measured (Media Foundation's software transform, then Cisco's OpenH264); a Windows.Graphics.Capture open
   # tried; an update to -902, then one to -903 rolled back; then all closed, uninstalled with no Run entry left, and the
-  # fixtures removed.
+  # fixtures removed. Then the end to end: the published installer's host, and a device on this runner that pairs at the
+  # runner's own address, streams a stand-in game and decodes it (ci-windows-smoke.sh e2e).
   windows-smoke:
     needs: guard
     runs-on: windows-2025
@@ -1007,6 +1010,23 @@ jobs:
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           bash apps/daffin/scripts/ci-windows-smoke.sh clean
+      # The Windows host end to end (Légal's proof, part b): a device on this runner streams from the host of the published
+      # installer. The device is daffin-stream-agent's example stream_probe (its `probe` feature: daffin-link's client to
+      # pair, OpenH264 built from source to decode), built from this commit.
+      - name: The end to end's device (stream_probe)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          if [ ! -f crates/daffin-stream-agent/examples/stream_probe.rs ]; then echo "no stream_probe in this commit"; exit 0; fi
+          cargo build --locked --release --message-format=short -p daffin-stream-agent --features probe --example stream_probe
+      - name: "The end to end: the published installer's host, a device pairs, lists, streams the stand-in and stops; Windows' firewall read"
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          if [ ! -f crates/daffin-stream-agent/examples/stream_probe.rs ]; then echo "no stream_probe in this commit"; exit 0; fi
+          bash apps/daffin/scripts/ci-windows-smoke.sh e2e target/release/examples/stream_probe.exe
 
   # The office bench (apps/daffin/scripts/office-bench): the owner's office (out only TCP 443 and UDP 3478, 19302-19309)
   # and Home's Freebox (UPnP maps every port, but delivers nothing to its 443) in network namespaces, no root: what
