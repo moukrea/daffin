@@ -503,6 +503,21 @@ jobs:
             ~/.gradle/caches/modules-2
             ~/.gradle/wrapper/dists
           key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+      # The art check's test host (ci-test-host-build.sh), built before the emulator boots, so that the build and the
+      # emulator never share the runner: the reds of 17 Nov 2026 all came 45 to 100 s after this build, made then with
+      # the emulator running. The art check takes it from DAFFIN_TEST_HOST; an older commit builds it there itself.
+      - name: The art check's test host (debug), before the emulator
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          script=apps/daffin/scripts/ci-test-host-build.sh
+          [ -f "$script" ] || { echo "no test host built ahead in this commit"; exit 0; }
+          rc=0
+          bin=$(bash "$script" "$RUNNER_TEMP/test-host") || rc=$?
+          [ "$rc" != 3 ] || { echo "check art: FAIL the host's crates not fetched"; exit 1; }
+          [ "$rc" = 0 ] || { echo "check art: FAIL the test host's build"; exit 1; }
+          echo "DAFFIN_TEST_HOST=$bin" >> "$GITHUB_ENV"
+          echo "check art: the test host built, before the emulator ok"
       - id: system-image
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -530,7 +545,14 @@ jobs:
           echo no | "$sdk/cmdline-tools/latest/bin/avdmanager" create avd -n ci -k "system-images;android-34;default;x86_64" -d pixel_6 > "$RUNNER_TEMP/avdmanager.log" 2>&1 ||
             { tail -30 "$RUNNER_TEMP/avdmanager.log"; echo "::error::avdmanager failed"; exit 1; }
           "$sdk/emulator/emulator" -list-avds
-          nohup "$sdk/emulator/emulator" -avd ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 4096 -accel on > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          # Which emulator and system image ran (neither is pinned: sdkmanager takes the stable channel's).
+          version=$("$sdk/emulator/emulator" -version 2>/dev/null || true)
+          image=$(grep -m1 '^Pkg.Revision=' "$sdk/system-images/android-34/default/x86_64/source.properties" || true)
+          echo "emulator: $(printf '%s\n' "$version" | grep -m1 -oE 'version [0-9.]+ \(build_id [0-9]+\)' || echo '?'), system image revision ${image#Pkg.Revision=}"
+          # Its status once it ends, in emulator.exit (128 + the signal that killed it), which a failed check prints
+          # (ci-failure-logs.sh).
+          nohup bash -c '"$@" > "$RUNNER_TEMP/emulator.log" 2>&1; echo "$?" > "$RUNNER_TEMP/emulator.exit"' emulator \
+            "$sdk/emulator/emulator" -avd ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 4096 -accel on > /dev/null 2>&1 &
           emulator=$!
           adb="$sdk/platform-tools/adb"
           booted=0
