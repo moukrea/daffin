@@ -1027,6 +1027,30 @@ jobs:
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           if [ ! -f crates/daffin-stream-agent/examples/stream_probe.rs ]; then echo "no stream_probe in this commit"; exit 0; fi
           bash apps/daffin/scripts/ci-windows-smoke.sh e2e target/release/examples/stream_probe.exe
+      # Windows' own encoder by default (the owner's C, 17 Nov 2026: crates/daffin-host/src/video/without_gpu.rs): this
+      # commit's build (901) on this runner, which has no GPU, with OpenH264 off, streams through Microsoft's software
+      # encoder. Blocking: it fails on any other encoder, read from the host's log and from stream/encoders.json.
+      - name: "Windows' own encoder: this commit's host, OpenH264 off, streams through Microsoft's software encoder alone"
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          if [ ! -f crates/daffin-stream-agent/examples/stream_probe.rs ]; then echo "no stream_probe in this commit"; exit 0; fi
+          bash apps/daffin/scripts/ci-windows-smoke.sh e2e-c target/release/examples/stream_probe.exe
+      # The Windows host's real picture: this commit's build (901) with the agent's own capture (Windows.Graphics.Capture,
+      # else DXGI) instead of the made-up picture, and OpenH264 on (the second pass of the encoders: e2e-c above has it
+      # off). First a window that moves on the runner's screen (e2e-capture), then daffin's NES fixture played by
+      # RetroArch 1.22.2 (its archives pinned by SHA-256), which the host finds on its PATH as on a person's PC and sets
+      # for the NES (emulators.use_detected), streamed from RetroArch's window (e2e-rom).
+      # Tried and reported, not blocking yet: neither part has run on a runner before (m72's run is their first), so a
+      # first failure is the test's own to fix, not a fault in what the train ships. It blocks once it has passed.
+      - name: "The real picture: this commit's host, its own capture of a moving window, then a ROM in RetroArch"
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          if [ ! -f crates/daffin-stream-agent/examples/stream_probe.rs ]; then echo "no stream_probe in this commit"; exit 0; fi
+          bash apps/daffin/scripts/ci-windows-smoke.sh e2e-real target/release/examples/stream_probe.exe || echo "windows-smoke: e2e-real: failed (tried, not required yet)"
 
   # The office bench (apps/daffin/scripts/office-bench): the owner's office (out only TCP 443 and UDP 3478, 19302-19309)
   # and Home's Freebox (UPnP maps every port, but delivers nothing to its 443) in network namespaces, no root: what
