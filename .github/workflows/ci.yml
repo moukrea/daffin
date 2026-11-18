@@ -1184,9 +1184,15 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: The host and its agent (release, OpenH264 from source)
         run: cargo build --locked --release -p daffin-host -p daffin-stream-agent --features daffin-stream-agent/bundled-openh264 --message-format=short
-      - name: The app (debug, its relay the bench's)
+      # Its account's site the bench's stand-in too (review_stand_in.py on the home network's loopback, via_host_e2e.py):
+      # never the live site; the other e2e here never sign in.
+      - name: The app (debug, its relay and its account's site the bench's)
         working-directory: apps/daffin/src-tauri
-        run: DAFFIN_AWAY_RELAY=ws://127.0.0.1:47443 cargo build --locked --message-format=short
+        run: DAFFIN_AWAY_RELAY=ws://127.0.0.1:47443 DAFFIN_ACCOUNT_TEST_BASE=http://127.0.0.1:18977 cargo build --locked --message-format=short
+      # « Demander à Home »'s host (via_host_e2e.py): a debug build, its account's site the bench's stand-in (a release
+      # build refuses the base: the job's last step proves it).
+      - name: The host (debug, its account's site the bench's)
+        run: DAFFIN_ACCOUNT_TEST_BASE=http://127.0.0.1:18977 cargo build --locked -p daffin-host --message-format=short
       # Route A (the page decodes with the system's decoders), 640x360, 120 frames: OpenH264 in software on 4 cores. The
       # e2e prints one JSON line whatever happens (counts, checks, or what failed: its type, message and script:line).
       - name: Home, then the office (the NAT as measured, then symmetric)
@@ -1217,6 +1223,21 @@ jobs:
           if [ ! -f apps/daffin/scripts/two_machines_e2e.py ]; then echo "no two-machine e2e in this commit"; exit 0; fi
           G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
           $G python3 apps/daffin/scripts/two_machines_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 --out "$RUNNER_TEMP/two"
+      # d148 point 2 (apps/daffin/scripts/via_host_e2e.py): a paired device's « Demander à {host} » on its game page, the
+      # request filed by the host at the account's site (review_stand_in.py, inside the home network, which has no way
+      # out: never nebul.earth), allowed from a device of the host's account, the seal read by the host, the device's
+      # page then; and the refusals (refused, another account, no account, the host offline). Nothing is ever played: no
+      # GeForce NOW process may run. One JSON line (checks and counts only).
+      - name: « Demander à Home », end to end
+        if: ${{ !cancelled() }}
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          if [ ! -f apps/daffin/scripts/via_host_e2e.py ]; then echo "no via-host e2e in this commit"; exit 0; fi
+          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
+          $G python3 apps/daffin/scripts/via_host_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/debug --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 --out "$RUNNER_TEMP/via-host"
       # The page's decoder with WebKitGTK's hardware acceleration off on WebKitGTK 2.54, Fedora's, which the Linux
       # packages meet there (apps/daffin/scripts/ci-webkit-noaccel.sh, in a Fedora container, the checkout read-only):
       # 2.54 aborted the web process at the first VideoDecoder without a shared GL display (desktop-v0.0.1-2); the
@@ -1230,6 +1251,18 @@ jobs:
           if [ ! -f apps/daffin/scripts/ci-webkit-noaccel.sh ]; then echo "no WebKitGTK 2.54 check in this commit"; exit 0; fi
           G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
           $G docker run --rm -v "$PWD:/src:ro" registry.fedoraproject.org/fedora:43 bash /src/apps/daffin/scripts/ci-webkit-noaccel.sh /src
+      # A release host never takes a test site for its account (crates/daffin-host/src/account.rs: its compile-time
+      # check): built with DAFFIN_ACCOUNT_TEST_BASE set, it must fail on that check. Last, as it rebuilds the release
+      # host's crate. The compiler's output is never printed (it quotes source lines): only whether it named the check.
+      - name: A release host refuses DAFFIN_ACCOUNT_TEST_BASE
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          if DAFFIN_ACCOUNT_TEST_BASE=http://127.0.0.1:18977 cargo build --locked --release -p daffin-host --message-format=short > "$RUNNER_TEMP/release-base.log" 2>&1; then
+            echo "::error::a release host built with DAFFIN_ACCOUNT_TEST_BASE set"; exit 1
+          fi
+          grep -q 'DAFFIN_ACCOUNT_TEST_BASE is for debug builds only' "$RUNNER_TEMP/release-base.log" || { echo "::error::the release build failed, but not on its test-base check"; exit 1; }
+          echo "a release host refuses DAFFIN_ACCOUNT_TEST_BASE: ok"
 
   # The built-in player's tools (apps/daffin/player/tools): their tests. The ones that need the cores built (emcc)
   # or Playwright skip themselves.
