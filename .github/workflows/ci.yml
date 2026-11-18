@@ -223,6 +223,9 @@ jobs:
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 60
+    env:
+      # WebKitGTK, GTK, libsoup and libudev, their development files (apps/daffin/scripts/ci-apt.sh: apt_install, apt_key).
+      APT_PACKAGES: libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -255,21 +258,36 @@ jobs:
           echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
       - name: Room on the disk (the runner's .NET and Haskell)
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup && df -h / | tail -1
+      # The packages' .debs from the last runs (apps/daffin/scripts/ci-apt.sh: apt_install, apt_key): Ubuntu's
+      # archive's, nothing else. An older commit without the script: no cache.
+      - id: apt-key
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          if [ -f apps/daffin/scripts/ci-apt.sh ]; then . apps/daffin/scripts/ci-apt.sh; apt_key; else printf 'prefix=apt-none-\nkey=apt-none-%s\n' "$GITHUB_JOB" >> "$GITHUB_OUTPUT"; fi
+      - id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/daffin-apt
+          key: ${{ steps.apt-key.outputs.key }}
+          restore-keys: ${{ steps.apt-key.outputs.prefix }}
+      # The faster of Ubuntu's two hosts here, retried, the cached .debs (ci-apt.sh). An older commit: plain apt-get.
       - name: WebKitGTK, GTK, libsoup and libudev (development files)
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
-          # The runner's mirror (azure.archive.ubuntu.com) sometimes does not resolve: every fetch tried 4 times with a
-          # short timeout, a failed index an error (apt-get update says nothing otherwise), and on a failure, or a name
-          # that does not resolve, archive.ubuntu.com in its place, the lists read again and the command once more.
-          apt_get() { sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any "$@"; }
-          apt_archive() {
-            echo "::warning::azure.archive.ubuntu.com failed: archive.ubuntu.com instead"
-            sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i 's#//azure\.archive\.ubuntu\.com/#//archive.ubuntu.com/#g' {} +
-          }
-          apt_try() { apt_get "$@" || { apt_archive; apt_get update -q && apt_get "$@"; }; }
-          getent hosts azure.archive.ubuntu.com > /dev/null || apt_archive
+          if [ -f apps/daffin/scripts/ci-apt.sh ]; then . apps/daffin/scripts/ci-apt.sh; else apt_pick() { :; }; apt_try() { sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; }; apt_install() { apt_try install -yq --no-install-recommends "$@"; }; fi
+          apt_pick
           apt_try update -q
-          apt_try install -yq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev
+          # shellcheck disable=SC2086
+          apt_install $APT_PACKAGES
+      # Saved at once, so that a later failure does not lose it.
+      - if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: ~/.cache/daffin-apt
+          key: ${{ steps.apt-key.outputs.key }}
       # As the workspace's: built first, then run with no network but loopback (the same preflight).
       - name: Tests, built
         working-directory: apps/daffin/src-tauri
@@ -546,13 +564,18 @@ jobs:
             { tail -30 "$RUNNER_TEMP/avdmanager.log"; echo "::error::avdmanager failed"; exit 1; }
           "$sdk/emulator/emulator" -list-avds
           # Which emulator and system image ran (neither is pinned: sdkmanager takes the stable channel's).
-          version=$("$sdk/emulator/emulator" -version 2>/dev/null || true)
+          # (Its version on stderr too: the runner's printed none on stdout, « emulator: ? », 18 Nov 2026.)
+          version=$("$sdk/emulator/emulator" -version 2>&1 || true)
           image=$(grep -m1 '^Pkg.Revision=' "$sdk/system-images/android-34/default/x86_64/source.properties" || true)
           echo "emulator: $(printf '%s\n' "$version" | grep -m1 -oE 'version [0-9.]+ \(build_id [0-9]+\)' || echo '?'), system image revision ${image#Pkg.Revision=}"
           # Its status once it ends, in emulator.exit (128 + the signal that killed it), which a failed check prints
           # (ci-failure-logs.sh).
+          # Its GPU: SwiftShader through ANGLE (swangle_indirect). swiftshader_indirect's host renderer crashed the
+          # emulator (signal 11) on an app's restart, right after « Failed to find ColorBuffer » and « Failed to bind to
+          # texture: invalid color buffer » (apt run 2, 44233139003, 18 Nov 2026; 1 run in 5 on m72 and V3 alike, 17 Nov),
+          # and segfaults at boot on fedora1; swangle_indirect ran every art check there, headless as here.
           nohup bash -c '"$@" > "$RUNNER_TEMP/emulator.log" 2>&1; echo "$?" > "$RUNNER_TEMP/emulator.exit"' emulator \
-            "$sdk/emulator/emulator" -avd ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 4096 -accel on > /dev/null 2>&1 &
+            "$sdk/emulator/emulator" -avd ci -no-window -no-audio -no-boot-anim -no-snapshot -gpu swangle_indirect -memory 4096 -accel on > /dev/null 2>&1 &
           emulator=$!
           adb="$sdk/platform-tools/adb"
           booted=0
@@ -1093,18 +1116,14 @@ jobs:
       # refuses every service start during the install).
       - name: Network tools for the bench
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
           printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
           sudo chmod 755 /usr/sbin/policy-rc.d
-          # The runner's mirror (azure.archive.ubuntu.com) sometimes does not resolve: every fetch tried 4 times with a
-          # short timeout, a failed index an error (apt-get update says nothing otherwise), and on a failure, or a name
-          # that does not resolve, archive.ubuntu.com in its place, the lists read again and the command once more.
-          apt_get() { sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any "$@"; }
-          apt_archive() {
-            echo "::warning::azure.archive.ubuntu.com failed: archive.ubuntu.com instead"
-            sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i 's#//azure\.archive\.ubuntu\.com/#//archive.ubuntu.com/#g' {} +
-          }
-          apt_try() { apt_get "$@" || { apt_archive; apt_get update -q && apt_get "$@"; }; }
-          getent hosts azure.archive.ubuntu.com > /dev/null || apt_archive
+          # The faster of Ubuntu's two hosts here, retried, archive.ubuntu.com on a failure (apps/daffin/scripts/ci-apt.sh);
+          # under 1 MB of packages: no cache. An older commit: plain apt-get.
+          if [ -f apps/daffin/scripts/ci-apt.sh ]; then . apps/daffin/scripts/ci-apt.sh; else apt_pick() { :; }; apt_try() { sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; }; fi
+          apt_pick
           apt_try update -q
           apt_try install -y -q --no-install-recommends nftables miniupnpd-nftables
           sudo rm -f /usr/sbin/policy-rc.d
@@ -1136,6 +1155,10 @@ jobs:
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 90
+    env:
+      # The app's build files; the bench's boxes; the private display; WebKitGTK's H.264 decoder
+      # (apps/daffin/scripts/ci-apt.sh: apt_install, apt_key).
+      APT_PACKAGES: libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev nftables miniupnpd-nftables mutter dbus dbus-user-session libgl1-mesa-dri libegl-mesa0 gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1172,14 +1195,40 @@ jobs:
       # The app's build files; the bench's boxes (nft, miniupnpd: never started as services on the runner's own network,
       # policy-rc.d refuses every service start during the install); the private display (mutter on Mesa's software
       # renderer, in its own D-Bus session); WebKitGTK's H.264 decoder (GStreamer's libav).
+      # Their .debs from the last runs (apps/daffin/scripts/ci-apt.sh: apt_install, apt_key): Ubuntu's archive's,
+      # nothing else. An older commit without the script: no cache.
+      - id: apt-key
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          if [ -f apps/daffin/scripts/ci-apt.sh ]; then . apps/daffin/scripts/ci-apt.sh; apt_key; else printf 'prefix=apt-none-\nkey=apt-none-%s\n' "$GITHUB_JOB" >> "$GITHUB_OUTPUT"; fi
+      - id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/daffin-apt
+          key: ${{ steps.apt-key.outputs.key }}
+          restore-keys: ${{ steps.apt-key.outputs.prefix }}
+      # The faster of Ubuntu's two hosts here, retried, the cached .debs (ci-apt.sh). An older commit: plain apt-get.
       - name: Build files, the bench's tools, the display, the decoder
         run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
           printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
           sudo chmod 755 /usr/sbin/policy-rc.d
-          sudo apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev nftables miniupnpd-nftables mutter dbus dbus-user-session libgl1-mesa-dri libegl-mesa0 gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+          if [ -f apps/daffin/scripts/ci-apt.sh ]; then . apps/daffin/scripts/ci-apt.sh; else apt_pick() { :; }; apt_try() { sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; }; apt_install() { apt_try install -yq --no-install-recommends "$@"; }; fi
+          apt_pick
+          apt_try update -q
+          # shellcheck disable=SC2086
+          apt_install $APT_PACKAGES
           sudo rm -f /usr/sbin/policy-rc.d
           if systemctl is-active --quiet miniupnpd; then sudo systemctl stop miniupnpd; fi
+      # Saved at once, so that a later failure does not lose it.
+      - if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        with:
+          path: ~/.cache/daffin-apt
+          key: ${{ steps.apt-key.outputs.key }}
       - name: User namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: The host and its agent (release, OpenH264 from source)
