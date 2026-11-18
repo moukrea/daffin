@@ -718,8 +718,9 @@ jobs:
         run: cargo test --locked --no-fail-fast --message-format=short
 
   # The Windows installer (NSIS) as scripts/windows-package.sh makes it (daffin-host beside the app), kept nowhere: it
-  # must carry THIRD-PARTY-LICENSES, the notices of the app and the host for Windows (licences.mjs installer), never the
-  # placeholder build.rs writes for cargo.
+  # passes the very check the publish guard runs on a release's installer (scripts/check-public.mjs installer, its
+  # windowsInstallerErrors: its programs' URLs, no player's cores, THIRD-PARTY-LICENSES exactly licences.mjs's list for
+  # Windows), never with the placeholder build.rs writes for cargo.
   windows-installer:
     needs: guard
     runs-on: windows-2025
@@ -817,10 +818,10 @@ jobs:
           echo "built $exe: $(stat -c %s "$exe") bytes"
           case "$exe" in /*) ;; *) exe=$PWD/$exe ;; esac
           echo "INSTALLER=$exe" >> "$GITHUB_ENV"
-      - name: The installer carries the notices, never the placeholder
+      - name: The installer passes the publish guard's own check
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          node apps/daffin/scripts/licences.mjs installer "$INSTALLER"
+          node scripts/check-public.mjs installer "$INSTALLER"
       # The refusal itself, on a real installer: as if bundle had not run, build.rs's placeholder in place of the notices,
       # the same build bundled again without the beforeBundleCommand.
       - name: An installer that carries the placeholder is refused
@@ -835,7 +836,7 @@ jobs:
             { grep -E '^[[:space:]]*(Error|Warn) ' "$RUNNER_TEMP/placeholder.log" | head -20 || true; exit 1; }
           placeholder=$(find src-tauri/target/release/bundle/nsis -name "*-setup.exe" | sort | head -1)
           [ -n "$placeholder" ] || { echo "::error::no installer bundled with the placeholder"; exit 1; }
-          if node scripts/licences.mjs installer "$placeholder"; then echo "::error::an installer carrying the placeholder passed"; exit 1; fi
+          if node ../../scripts/check-public.mjs installer "$placeholder"; then echo "::error::an installer carrying the placeholder passed"; exit 1; fi
           echo "refused, as it must be"
 
   # A release run only (the `release` input): the Windows installer of that desktop release, built as the windows-installer
@@ -933,8 +934,9 @@ jobs:
             { grep -E '^(error|warning)(\[[A-Za-z0-9]+\])?: |^[[:space:]]+--> |^[[:space:]]*(Error|Warn|Info|Running|Finished|Bundling) |^licences: |^windows-package: ' "$RUNNER_TEMP/package.log" | head -200 || true; exit 1; }
           exe="$out/build/daffin-$RELEASE-x86_64-setup.exe"
           [ -f "$exe" ] || { echo "::error::windows-package.sh made no daffin-$RELEASE-x86_64-setup.exe"; exit 1; }
-          # The notices of what it carries (the app and daffin-host), never build.rs's placeholder.
-          DAFFIN_BUNDLE_BINARIES=app,host node scripts/licences.mjs installer "$exe"
+          # The publish guard's own check of this installer (scripts/check-public.mjs installer): what passes here passes
+          # desktop-release.sh --publish.
+          node ../../scripts/check-public.mjs installer "$exe"
           cp "$exe" "$out/daffin-$RELEASE-x86_64.exe"
           # « <hash>  <name> » as on Linux (Git Bash's sha256sum writes « <hash> *<name> »).
           printf '%s  %s\n' "$(sha256sum < "$out/daffin-$RELEASE-x86_64.exe" | cut -c1-64)" "daffin-$RELEASE-x86_64.exe" > "$out/SHA256SUMS.windows"
