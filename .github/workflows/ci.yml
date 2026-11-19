@@ -705,9 +705,23 @@ jobs:
       - name: "Tests: the workspace"
         if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
         run: cargo test --locked --workspace --no-fail-fast --message-format=short
-      - name: The host and the stream agent, as released
+      - id: release
+        name: The host and the stream agent, as released
         if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
         run: cargo build --locked --release -p daffin-host -p daffin-stream-agent --message-format=short
+      # The runner's real desktop, end to end (ci-windows-smoke.sh `capture`): this build's host and agent, their own
+      # capture (WGC, else DXGI), a moving window streamed to a device that decodes it. Windows Server 2025 here (build
+      # 26100: WGC's MinUpdateInterval exists); windows-capture-2022 below runs it on 20348, where it does not.
+      - name: The capture's device (stream_probe)
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
+        run: cargo build --locked --release --message-format=short -p daffin-stream-agent --features probe --example stream_probe
+      - name: "The real desktop, end to end: this host's capture of a moving window, decoded by a device"
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
+        timeout-minutes: 15
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          if ! grep -q '^  capture)' apps/daffin/scripts/ci-windows-smoke.sh; then echo "no capture end to end in this commit"; exit 0; fi
+          bash apps/daffin/scripts/ci-windows-smoke.sh capture target/release target/release/examples/stream_probe.exe
       - name: "Clippy: the app's crate (every target, warnings denied)"
         if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
         working-directory: apps/daffin/src-tauri
@@ -716,6 +730,63 @@ jobs:
         if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
         working-directory: apps/daffin/src-tauri
         run: cargo test --locked --no-fail-fast --message-format=short
+
+  # The runner's real desktop on Windows Server 2022 (build 20348), end to end: the same check as the windows job's, on a
+  # Windows where WGC's session has no MinUpdateInterval (documented from 10.0.26100), as the owner's Laptop (22631,
+  # 18 Nov 2026): there the capture asked for a 1 ms interval, Windows refused it, and the DXGI fallback gave no
+  # picture. This build's host and agent (release, kept nowhere) and the device; nothing else.
+  windows-capture-2022:
+    needs: guard
+    runs-on: windows-2022
+    permissions: {}
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: windows-cargo-registry-
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          # Unix-style paths: Git's sh reads GIT_SSH_COMMAND, where a Windows path's backslashes would be escapes.
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          key="$tmp/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$tmp/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          cargo fetch --locked
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - name: The host and the stream agent, as released, and the device (stream_probe)
+        run: |
+          cargo build --locked --release -p daffin-host -p daffin-stream-agent --message-format=short
+          cargo build --locked --release --message-format=short -p daffin-stream-agent --features probe --example stream_probe
+      - name: "The real desktop, end to end on Windows Server 2022: this host's capture of a moving window, decoded by a device"
+        timeout-minutes: 15
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          if ! grep -q '^  capture)' apps/daffin/scripts/ci-windows-smoke.sh; then echo "no capture end to end in this commit"; exit 0; fi
+          bash apps/daffin/scripts/ci-windows-smoke.sh capture target/release target/release/examples/stream_probe.exe
 
   # The Windows installer (NSIS) as scripts/windows-package.sh makes it (daffin-host beside the app), kept nowhere: it
   # passes the very check the publish guard runs on a release's installer (scripts/check-public.mjs installer, its
@@ -1358,7 +1429,7 @@ jobs:
 
   # One line per job: what the train reads (gh run view --repo moukrea/daffin <run>).
   summary:
-    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows, windows-installer, windows-smoke, office-bench, away-e2e]
+    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows, windows-capture-2022, windows-installer, windows-smoke, office-bench, away-e2e]
     if: always()
     runs-on: ubuntu-24.04
     permissions: {}
