@@ -1158,9 +1158,10 @@ jobs:
     permissions: {}
     timeout-minutes: 90
     env:
-      # The app's build files; the bench's boxes; the private display; WebKitGTK's H.264 decoder
-      # (apps/daffin/scripts/ci-apt.sh: apt_install, apt_key).
-      APT_PACKAGES: libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev nftables miniupnpd-nftables mutter dbus dbus-user-session libgl1-mesa-dri libegl-mesa0 gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+      # The app's build files; the bench's boxes; the private display; WebKitGTK's H.264 decoder; d147's host screen and
+      # its stand-in window (Xwayland, GStreamer's X sink and gst-launch) (apps/daffin/scripts/ci-apt.sh: apt_install,
+      # apt_key).
+      APT_PACKAGES: libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libudev-dev nftables miniupnpd-nftables mutter dbus dbus-user-session libgl1-mesa-dri libegl-mesa0 gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad xwayland gstreamer1.0-x gstreamer1.0-tools
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1289,6 +1290,22 @@ jobs:
           if [ ! -f apps/daffin/scripts/via_host_e2e.py ]; then echo "no via-host e2e in this commit"; exit 0; fi
           G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
           $G python3 apps/daffin/scripts/via_host_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/debug --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 --out "$RUNNER_TEMP/via-host"
+      # d147 (apps/daffin/scripts/via_host_stream_e2e.py): « Streaming depuis {host} · GeForce NOW » for a game not
+      # installed on the host, from its catalogue entry's page and its Steam page, at home and away (the office), the
+      # switch off then on, a window open before left alone; the host's capture « x11, stand-in GFN window »
+      # (gfn_stand_in.py as the host's flatpak, on an Xwayland of the run's own: never NVIDIA's app, never a session, the
+      # account's site the bench's stand-in). The debug host (its test base), the release agent (OpenH264) beside it.
+      # One JSON line (checks and counts only).
+      - name: « Depuis Home » for a game not installed there, end to end
+        if: ${{ !cancelled() }}
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          if [ ! -f apps/daffin/scripts/via_host_stream_e2e.py ]; then echo "no via-host stream e2e in this commit"; exit 0; fi
+          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
+          $G python3 apps/daffin/scripts/via_host_stream_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/debug --agent target/release/daffin-stream-agent --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 --out "$RUNNER_TEMP/via-host-stream"
       # The page's decoder with WebKitGTK's hardware acceleration off on WebKitGTK 2.54, Fedora's, which the Linux
       # packages meet there (apps/daffin/scripts/ci-webkit-noaccel.sh, in a Fedora container, the checkout read-only):
       # 2.54 aborted the web process at the first VideoDecoder without a shared GL display (desktop-v0.0.1-2); the
