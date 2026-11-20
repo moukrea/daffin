@@ -806,6 +806,17 @@ jobs:
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           if ! grep -q '^  capture)' apps/daffin/scripts/ci-windows-smoke.sh; then echo "no capture end to end in this commit"; exit 0; fi
           bash apps/daffin/scripts/ci-windows-smoke.sh capture target/release target/release/examples/stream_probe.exe
+      # A device's pad played as keys, with no driver (ci-windows-smoke.sh `padkeys`, daffin-0243): this build's host and
+      # agent on the runner's real desktop, a test window in front as the stream's game, the device's pad states sent
+      # over its link, and the keys Windows gave the window (SendInput, by scan code) checked against those
+      # crates/daffin-host/src/pad_keys.rs promises, in order, each let go. A test window on a CI runner, not a game.
+      - name: "Pads as keys on the real desktop: a device's pad presses, the keys a window in front receives"
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
+        timeout-minutes: 10
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          if ! grep -q '^  padkeys)' apps/daffin/scripts/ci-windows-smoke.sh; then echo "no pads-as-keys check in this commit"; exit 0; fi
+          bash apps/daffin/scripts/ci-windows-smoke.sh padkeys target/release target/release/examples/stream_probe.exe
       - name: "Clippy: the app's crate (every target, warnings denied)"
         if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
         working-directory: apps/daffin/src-tauri
