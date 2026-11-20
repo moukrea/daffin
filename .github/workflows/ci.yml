@@ -632,6 +632,8 @@ jobs:
           echo "pid: ${pid:-none}; resumed: $resumed"
           "$adb" logcat -d > "$RUNNER_TEMP/logcat.log" || true
           "$adb" logcat -d -b crash >> "$RUNNER_TEMP/logcat.log" || true
+          # The crash and ANR check below reads this file: an empty one (logcat failed) would pass it unread.
+          [ -s "$RUNNER_TEMP/logcat.log" ] || { echo "::error::Android's log could not be read: no crash check possible"; exit 1; }
           # daffin's own crashes and « isn't responding » only: a Java exception, a native signal, an ANR.
           grep -E "Process: one\.daffin\.app|pid [0-9]+ \(one\.daffin\.app\)|ANR in one\.daffin\.app" "$RUNNER_TEMP/logcat.log" > "$RUNNER_TEMP/fatal.log" || true
           fail=0
@@ -655,15 +657,75 @@ jobs:
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
           script=apps/daffin/scripts/ci-device-checks.sh
-          [ -f "$script" ] || { echo "no update check in this commit"; exit 0; }
+          # Never green on a check that is not there: a script renamed or removed fails the step (« CI honnête »).
+          [ -f "$script" ] || { echo "::error::$script is missing: the update check cannot run"; exit 1; }
           export JAVA_HOME="$JAVA_HOME_21_X64" ANDROID_HOME="$ANDROID_SDK_ROOT" NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
           export GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.configuration-cache=false"
           export PATH="$ANDROID_SDK_ROOT/platform-tools:$PATH"
           serial=$(adb devices | awk 'NR > 1 && $1 ~ /^emulator-/ && $2 == "device" { print $1; exit }')
           [ -n "$serial" ] || { echo "::error::no emulator"; exit 1; }
           # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
-          G="node scripts/ci-skips.mjs android-emulator --"; [ -f scripts/ci-skips.mjs ] || G=""
+          [ -f scripts/ci-skips.mjs ] || { echo "::error::scripts/ci-skips.mjs is missing: a skipped check would pass"; exit 1; }
+          G="node scripts/ci-skips.mjs android-emulator --"
           $G bash "$script" update --serial "$serial"
+
+  # The app's Rust as phones run it (« CI honnête », daffin-0171): no other job lints the code under
+  # cfg(target_os = "android"), and the APK's build neither lints it nor compiles its tests. Clippy for aarch64 (what the
+  # APK ships), every target, warnings denied: `scripts/gate --target aarch64-linux-android` on fedora1. Nothing kept.
+  android-clippy:
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-registry-
+      - name: Rust toolchain (aarch64 Android, clippy)
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" aarch64-linux-android
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          key="$RUNNER_TEMP/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          (cd apps/daffin/src-tauri && cargo fetch --locked)
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      # The C compilers some dependencies build with (ring's, aws-lc's), as scripts/gate sets them on fedora1.
+      - name: The NDK's compilers
+        run: |
+          set -euo pipefail
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          [ -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ] || "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          bin="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          [ -x "$bin/aarch64-linux-android24-clang" ] || { echo "::error::no NDK clang for aarch64-linux-android"; exit 1; }
+          {
+            echo "CC_aarch64_linux_android=$bin/aarch64-linux-android24-clang"
+            echo "CXX_aarch64_linux_android=$bin/aarch64-linux-android24-clang++"
+            echo "AR_aarch64_linux_android=$bin/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+      - name: Clippy for Android (aarch64, every target, warnings denied)
+        working-directory: apps/daffin/src-tauri
+        run: cargo clippy --locked --target aarch64-linux-android --all-targets --message-format=short -- -D warnings
 
   # Windows (MSVC): the host's workspace and the app's crate, clippy and tests, and the host and the stream agent built as
   # they ship (kept nowhere: no artifact). Every step runs even after one fails, so that one run says all that breaks.
@@ -1142,7 +1204,8 @@ jobs:
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
-          G="node scripts/ci-skips.mjs windows-smoke --"; [ -f scripts/ci-skips.mjs ] || G=""
+          [ -f scripts/ci-skips.mjs ] || { echo "::error::scripts/ci-skips.mjs is missing: a skipped check would pass"; exit 1; }
+          G="node scripts/ci-skips.mjs windows-smoke --"
           $G bash apps/daffin/scripts/ci-windows-smoke.sh checks
       - name: The app closed and uninstalled
         if: always()
@@ -1231,14 +1294,13 @@ jobs:
           DAFFIN_BENCH_REQUIRED: '1'
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          if [ ! -f apps/daffin/scripts/office-bench/bench.py ]; then echo "no office bench in this commit"; exit 0; fi
+          if [ ! -f apps/daffin/scripts/office-bench/bench.py ]; then echo "::error::apps/daffin/scripts/office-bench/bench.py is missing: the office bench cannot run"; exit 1; fi
           # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
-          G="node scripts/ci-skips.mjs office-bench --"; [ -f scripts/ci-skips.mjs ] || G=""
+          [ -f scripts/ci-skips.mjs ] || { echo "::error::scripts/ci-skips.mjs is missing: a skipped check would pass"; exit 1; }
+          G="node scripts/ci-skips.mjs office-bench --"
           $G python3 apps/daffin/scripts/office-bench/bench.py check
-          # The same with a symmetric office NAT (a phone on a carrier network), where the bench has the option.
-          if grep -q -- '--office-nat' apps/daffin/scripts/office-bench/bench.py; then
-            $G python3 apps/daffin/scripts/office-bench/bench.py check --office-nat symmetric
-          fi
+          # The same with a symmetric office NAT (a phone on a carrier network): the bench must have the option.
+          $G python3 apps/daffin/scripts/office-bench/bench.py check --office-nat symmetric
 
   # Playing away from home, end to end (apps/daffin/scripts/away_stream_e2e.py), on the office bench: the app paired at
   # home streams from the office through the Freebox's mapped ports, the relay carrying the signalling only; the office's
@@ -1348,10 +1410,11 @@ jobs:
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
-          if [ ! -f apps/daffin/scripts/away_stream_e2e.py ]; then echo "no away e2e in this commit"; exit 0; fi
+          if [ ! -f apps/daffin/scripts/away_stream_e2e.py ]; then echo "::error::apps/daffin/scripts/away_stream_e2e.py is missing: the away e2e cannot run"; exit 1; fi
           # WebKitGTK without compositing: on Mesa's software renderer its compositor stalls the page.
           # A check that skipped itself fails the step unless scripts/ci-plan.mjs allows it (scripts/ci-skips.mjs).
-          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
+          [ -f scripts/ci-skips.mjs ] || { echo "::error::scripts/ci-skips.mjs is missing: a skipped check would pass"; exit 1; }
+          G="node scripts/ci-skips.mjs away-e2e --"
           e2e() { $G python3 apps/daffin/scripts/away_stream_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --route a --size 640x360 --frames 120 --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 "$@"; }
           e2e --out "$RUNNER_TEMP/away"
           e2e --out "$RUNNER_TEMP/away-symmetric" --office-nat symmetric
@@ -1365,8 +1428,9 @@ jobs:
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
-          if [ ! -f apps/daffin/scripts/two_machines_e2e.py ]; then echo "no two-machine e2e in this commit"; exit 0; fi
-          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
+          if [ ! -f apps/daffin/scripts/two_machines_e2e.py ]; then echo "::error::apps/daffin/scripts/two_machines_e2e.py is missing: the two-machine e2e cannot run"; exit 1; fi
+          [ -f scripts/ci-skips.mjs ] || { echo "::error::scripts/ci-skips.mjs is missing: a skipped check would pass"; exit 1; }
+          G="node scripts/ci-skips.mjs away-e2e --"
           $G python3 apps/daffin/scripts/two_machines_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/release --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 --out "$RUNNER_TEMP/two"
       # d148 point 2 (apps/daffin/scripts/via_host_e2e.py): a paired device's « Demander à {host} » on its game page, the
       # request filed by the host at the account's site (review_stand_in.py, inside the home network, which has no way
@@ -1381,7 +1445,8 @@ jobs:
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
           if [ ! -f apps/daffin/scripts/via_host_e2e.py ]; then echo "no via-host e2e in this commit"; exit 0; fi
-          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
+          [ -f scripts/ci-skips.mjs ] || { echo "::error::scripts/ci-skips.mjs is missing: a skipped check would pass"; exit 1; }
+          G="node scripts/ci-skips.mjs away-e2e --"
           $G python3 apps/daffin/scripts/via_host_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/debug --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 --out "$RUNNER_TEMP/via-host"
       # d147 (apps/daffin/scripts/via_host_stream_e2e.py): « Streaming depuis {host} · GeForce NOW » for a game not
       # installed on the host, from its catalogue entry's page and its Steam page, at home and away (the office), the
@@ -1397,7 +1462,8 @@ jobs:
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
           if [ ! -f apps/daffin/scripts/via_host_stream_e2e.py ]; then echo "no via-host stream e2e in this commit"; exit 0; fi
-          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
+          [ -f scripts/ci-skips.mjs ] || { echo "::error::scripts/ci-skips.mjs is missing: a skipped check would pass"; exit 1; }
+          G="node scripts/ci-skips.mjs away-e2e --"
           $G python3 apps/daffin/scripts/via_host_stream_e2e.py --app apps/daffin/src-tauri/target/debug/daffin --bin target/debug --agent target/release/daffin-stream-agent --app-env WEBKIT_DISABLE_COMPOSITING_MODE=1 --out "$RUNNER_TEMP/via-host-stream"
       # The page's decoder with WebKitGTK's hardware acceleration off on WebKitGTK 2.54, Fedora's, which the Linux
       # packages meet there (apps/daffin/scripts/ci-webkit-noaccel.sh, in a Fedora container, the checkout read-only):
@@ -1409,8 +1475,9 @@ jobs:
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
           set -euo pipefail
-          if [ ! -f apps/daffin/scripts/ci-webkit-noaccel.sh ]; then echo "no WebKitGTK 2.54 check in this commit"; exit 0; fi
-          G="node scripts/ci-skips.mjs away-e2e --"; [ -f scripts/ci-skips.mjs ] || G=""
+          if [ ! -f apps/daffin/scripts/ci-webkit-noaccel.sh ]; then echo "::error::apps/daffin/scripts/ci-webkit-noaccel.sh is missing: the WebKitGTK 2.54 check cannot run"; exit 1; fi
+          [ -f scripts/ci-skips.mjs ] || { echo "::error::scripts/ci-skips.mjs is missing: a skipped check would pass"; exit 1; }
+          G="node scripts/ci-skips.mjs away-e2e --"
           $G docker run --rm -v "$PWD:/src:ro" registry.fedoraproject.org/fedora:43 bash /src/apps/daffin/scripts/ci-webkit-noaccel.sh /src
       # A release host never takes a test site for its account (crates/daffin-host/src/account.rs: its compile-time
       # check): built with DAFFIN_ACCOUNT_TEST_BASE set, it must fail on that check. Last, as it rebuilds the release
@@ -1425,8 +1492,11 @@ jobs:
           grep -q 'DAFFIN_ACCOUNT_TEST_BASE is for debug builds only' "$RUNNER_TEMP/release-base.log" || { echo "::error::the release build failed, but not on its test-base check"; exit 1; }
           echo "a release host refuses DAFFIN_ACCOUNT_TEST_BASE: ok"
 
-  # The built-in player's tools (apps/daffin/player/tools): their tests. The ones that need the cores built (emcc)
-  # or Playwright skip themselves.
+  # The built-in player's tools (apps/daffin/player/tools): their tests, with fontTools, brotli and Pillow installed so that
+  # the font tests run (test_pgf.py draws glyphs with Pillow: m88 run 44673422530 failed on « No module named 'PIL' »). The browser tests play games in Playwright's Chromium on emulator cores that player/build.sh builds
+  # (Emscripten), which this job does not build: each of their skips is said and counted (scripts/pytest_skip_lines.py,
+  # scripts/ci-skips.mjs, scripts/ci-plan.mjs MAY_SKIP), and a skip for any other reason fails the step. Then the app's
+  # scripts' own Python tests.
   player-tools:
     needs: guard
     runs-on: ubuntu-24.04
@@ -1442,16 +1512,33 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
       - name: pytest
         working-directory: apps/daffin/player
         run: |
           exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
-          python -m pip install --quiet 'pytest==8.4.2'
-          python -m pytest -q --tb=line tools/
+          set -euo pipefail
+          python -m pip install --quiet 'pytest==8.4.2' 'fonttools==4.68.0' 'brotli==1.2.1' 'pillow==12.1.0'
+          for f in scripts/ci-skips.mjs scripts/pytest_skip_lines.py; do
+            [ -f "$GITHUB_WORKSPACE/$f" ] || { echo "::error::$f is missing: a skipped test would pass"; exit 1; }
+          done
+          # Every skipped test said, one line each (scripts/pytest_skip_lines.py), and counted: by design or a failure.
+          G="node $GITHUB_WORKSPACE/scripts/ci-skips.mjs player-tools --"
+          PYTHONPATH="$GITHUB_WORKSPACE/scripts" $G python -m pytest -q --tb=line -p pytest_skip_lines tools/
+      # The app's scripts' own Python tests that no Node test runs (apps/daffin/tests/ci-coverage.test.mjs holds every
+      # apps/daffin/scripts/test_*.py to this step or to a Node test).
+      - name: The app's scripts' Python tests
+        working-directory: apps/daffin/scripts
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          python -m pytest -q --tb=line test_emulators_registry.py
 
   # One line per job: what the train reads (gh run view --repo moukrea/daffin <run>).
   summary:
-    needs: [checks, workspace, app, android-release, android-emulator, player-tools, windows, windows-capture-2022, windows-installer, windows-smoke, office-bench, away-e2e]
+    needs: [checks, workspace, app, android-release, android-emulator, android-clippy, player-tools, windows, windows-capture-2022, windows-installer, windows-smoke, office-bench, away-e2e]
     if: always()
     runs-on: ubuntu-24.04
     permissions: {}
