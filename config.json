@@ -2,7 +2,7 @@
   "version": 1,
   "page": "https://moukrea.github.io/daffin/",
   "repository": "moukrea/daffin",
-  "androidRelease": "android-v0.0.1-55",
+  "androidRelease": "android-v0.0.1-56",
   "desktopRelease": "desktop-v0.0.1-52",
   "windowsRelease": "desktop-v0.0.1-52"
 }
