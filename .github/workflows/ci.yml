@@ -487,14 +487,20 @@ jobs:
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ env.RUSTUP_TOOLCHAIN }}
+      # This job's Gradle cache holds the unit tests' dependencies too (below), under its own prefix: the gradle-… caches,
+      # saved after an APK build only, never held them. The key's hash is taken here before the APK build and at the save
+      # after it, which adds the generated app/tauri.build.gradle.kts: the exact key never matches, the cache comes by its
+      # prefix, and the save succeeds once per post-build hash (« Unable to reserve cache » after that, as before).
       - id: gradle
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.gradle/caches/modules-2
             ~/.gradle/wrapper/dists
-          key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: gradle-
+          key: gradle-unit-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-unit-
+            gradle-
       - name: The APK (x86_64, debug)
         working-directory: apps/daffin
         run: |
@@ -513,6 +519,22 @@ jobs:
           [ -n "$apk" ] || { echo "::error::no APK"; exit 1; }
           echo "built $apk: $(stat -c %s "$apk") bytes"
           echo "APK_PATH=$PWD/$apk" >> "$GITHUB_ENV"
+      # The app's JVM unit tests' dependencies (junit and what it needs), which the APK build never resolves, fetched into
+      # Gradle's cache before it is saved (android-unit-tests.sh --deps-only): « The update, as a phone gets it » then runs
+      # those tests with Gradle offline (DAFFIN_UNIT_TESTS_OFFLINE). Until 20 Nov 2026 that step downloaded junit in every
+      # run, and it failed in 3 of the 10 runs from 18 to 20 Nov (m83 44489026239, desktop-v0.0.1-51 44594663350, m87
+      # 44657574253: « could not resolve junit:junit:4.13.2 »). Once the cache is saved, nothing is downloaded here either.
+      # An older commit without --deps-only: nothing, and its tests download as before.
+      - name: The unit tests' dependencies, into the Gradle cache
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          script=apps/daffin/scripts/android-unit-tests.sh
+          grep -F -e '--deps-only' "$script" > /dev/null || { echo "no unit tests' dependencies to fetch in this commit"; exit 0; }
+          export JAVA_HOME="$JAVA_HOME_21_X64" ANDROID_HOME="$ANDROID_SDK_ROOT" NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
+          export GRADLE_OPTS="-Dorg.gradle.daemon=false -Dorg.gradle.configuration-cache=false"
+          bash "$script" --deps-only --log "$RUNNER_TEMP/unit-deps.log"
+          echo DAFFIN_UNIT_TESTS_OFFLINE=1 >> "$GITHUB_ENV"
       - if: steps.gradle.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
@@ -520,7 +542,7 @@ jobs:
           path: |
             ~/.gradle/caches/modules-2
             ~/.gradle/wrapper/dists
-          key: gradle-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-unit-${{ hashFiles('apps/daffin/src-tauri/gen/android/**/*.gradle.kts', 'apps/daffin/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
       # The art check's test host (ci-test-host-build.sh), built before the emulator boots, so that the build and the
       # emulator never share the runner: the reds of 17 Nov 2026 all came 45 to 100 s after this build, made then with
       # the emulator running. The art check takes it from DAFFIN_TEST_HOST; an older commit builds it there itself.
