@@ -9,7 +9,9 @@ name: CI
 # back); compiler diagnostics in short form (where and what, never the source line); the jaunt-src key forgotten once
 # the dependencies are fetched, before anything is installed or built. scripts/check-public.mjs (daffin-src) holds this
 # file to that. It lives in daffin-src as ops/public/.github/workflows/ci.yml and is published from there.
-run-name: CI ${{ inputs.label || 'train' }} ${{ inputs.sha }}
+# An away proof's run (the `away` input) is titled « Away proof … »: never a CI run of its commit (scripts/ci-green.mjs
+# reads `CI <label> <sha>` titles only), since it runs windows-away alone.
+run-name: ${{ inputs.away != '' && 'Away proof' || 'CI' }} ${{ inputs.label || 'train' }} ${{ inputs.sha }}
 on:
   workflow_dispatch:
     inputs:
@@ -27,9 +29,16 @@ on:
         required: false
         default: ''
         type: string
+      away:
+        description: 'An away proof (daffin-0242, apps/daffin/scripts/away_windows_proof.py): « SEED wss://<name>.trycloudflare.com », the run''s fresh seed and its test relay; windows-away alone runs'
+        required: false
+        default: ''
+        type: string
 permissions: {}
 concurrency:
-  group: ci-${{ inputs.sha }}
+  # An away proof's run has a group of its own: a group keeps one run waiting, and a train's CI on the same commit must
+  # not take an away run's place, nor the other way round.
+  group: ci-${{ inputs.away != '' && 'away-' || '' }}${{ inputs.sha }}
   cancel-in-progress: false
 env:
   # The toolchain the source is checked with on fedora1 and on Windows: a newer one on the runner does not turn clippy red.
@@ -51,16 +60,25 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Require an exact source commit
+        # `away` (an away proof's seed and its tunnel) is never in an env: block, which GitHub prints at the head of the
+        # step's public log (run 44753491611 printed it): read from the event's file here, masked before anything else.
         env:
           SHA: ${{ inputs.sha }}
           LABEL: ${{ inputs.label }}
+          RELEASE: ${{ inputs.release }}
         run: |
+          jq -e '(.inputs.away // "") | test("[\r\n]") | not' "$GITHUB_EVENT_PATH" > /dev/null || { echo "::error::away: one line only (refused before it is masked, never printed)"; exit 1; }
+          AWAY=$(jq -r '.inputs.away // ""' "$GITHUB_EVENT_PATH")
+          [ -z "$AWAY" ] || { echo "::add-mask::${AWAY%% *}"; echo "::add-mask::${AWAY#* }"; echo "::add-mask::${AWAY#* wss://}"; }
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full commit id (40 lowercase hexadecimal characters)"; exit 1; }
           [[ "$LABEL" =~ ^[A-Za-z0-9._/#:+-]{0,64}$ ]] || { echo "::error::label: letters, digits and ._/#:+- only, 64 at most"; exit 1; }
+          [ -z "$AWAY" ] || [[ "$AWAY" =~ ^[A-Za-z0-9_-]{43}\ wss://[a-z0-9-]{1,63}\.trycloudflare\.com$ ]] || { echo "::error::away: a seed (43 characters of base64url), a space, a wss://<name>.trycloudflare.com address"; exit 1; }
+          [ -z "$AWAY" ] || [ -z "$RELEASE" ] || { echo "::error::away and release: one or the other"; exit 1; }
 
   # Node's tests, « Licences » against Cargo.lock, what may go public, the catalogue server, the crates' licences.
   checks:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 30
@@ -148,6 +166,7 @@ jobs:
   # The host's workspace (the host, its libraries, the stream agent): its tests and clippy, every feature.
   workspace:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 60
@@ -220,6 +239,7 @@ jobs:
   # The app's crate (apps/daffin/src-tauri, a workspace of its own) on Linux: its tests and clippy.
   app:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 60
@@ -323,6 +343,7 @@ jobs:
   # fonts checked as the release checks them; the APK itself stays here.
   android-release:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 75
@@ -437,6 +458,7 @@ jobs:
   # crash or an « isn't responding » dialog.
   android-emulator:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 75
@@ -674,6 +696,7 @@ jobs:
   # APK ships), every target, warnings denied: `scripts/gate --target aarch64-linux-android` on fedora1. Nothing kept.
   android-clippy:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 45
@@ -731,6 +754,7 @@ jobs:
   # they ship (kept nowhere: no artifact). Every step runs even after one fails, so that one run says all that breaks.
   windows:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: windows-2025
     permissions: {}
     timeout-minutes: 90
@@ -832,6 +856,7 @@ jobs:
   # picture. This build's host and agent (release, kept nowhere) and the device; nothing else.
   windows-capture-2022:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: windows-2022
     permissions: {}
     timeout-minutes: 75
@@ -883,12 +908,74 @@ jobs:
           if ! grep -q '^  capture)' apps/daffin/scripts/ci-windows-smoke.sh; then echo "no capture end to end in this commit"; exit 0; fi
           bash apps/daffin/scripts/ci-windows-smoke.sh capture target/release target/release/examples/stream_probe.exe
 
+  # Away from home to a real Windows host (daffin-0242, on an `away` run only, which runs nothing else): this build's
+  # host (a test build: optimized, debug assertions on; kept nowhere) behind Windows' firewall as a person's PC has it,
+  # given the run's fresh seed (its link identity and its one paired device: crates/daffin-host/src/test_seed.rs, which
+  # a release refuses) and the run's test relay on node behind a Cloudflare Quick Tunnel
+  # (apps/daffin/scripts/away_windows_proof.py). Then it waits for the seed's device on node (stream_probe away), which
+  # reaches it through that relay for the signalling and a direct link for everything else, never a TURN server. No
+  # account. The seed opens this disposable host and that disposable relay for this run: whoever holds it could be the
+  # paired device, so it is a secret for the run's length. It is never in an env: block (GitHub prints those in the
+  # log): ci-windows-smoke.sh reads it from the event's file and masks it, with the tunnel's name, before anything else.
+  # The log says the host's direct links and the device's report in fixed words (ci-windows-smoke.sh `away`).
+  windows-away:
+    needs: guard
+    if: ${{ inputs.away != '' }}
+    runs-on: windows-2025
+    permissions: {}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: moukrea/daffin-src
+          ref: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DAFFIN_SRC_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: windows-cargo-registry-${{ hashFiles('Cargo.lock', 'apps/daffin/src-tauri/Cargo.lock') }}
+          restore-keys: windows-cargo-registry-
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Dependencies (crates.io's and the nebul crates), then the jaunt-src key forgotten
+        env:
+          JAUNT_KEY: ${{ secrets.JAUNT_SRC_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$JAUNT_KEY" ] || { echo "::error::The JAUNT_SRC_READ_KEY secret is missing (a read-only deploy key of moukrea/jaunt-src)"; exit 1; }
+          # Unix-style paths: Git's sh reads GIT_SSH_COMMAND, where a Windows path's backslashes would be escapes.
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          key="$tmp/jaunt_src"
+          (umask 077 && printf '%s\n' "$JAUNT_KEY" > "$key")
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$tmp/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:moukrea/jaunt-src.insteadOf GIT_CONFIG_VALUE_0=https://github.com/moukrea/jaunt-src
+          cargo fetch --locked
+          rm -f "$key"
+          echo CARGO_NET_OFFLINE=true >> "$GITHUB_ENV"
+      - name: The host and the stream agent, a test build (optimized, debug assertions on, the host's away-proof feature)
+        run: CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo build --locked --release -p daffin-host -p daffin-stream-agent --features daffin-host/away-proof --message-format=short
+      - name: "Away from home: this host behind Windows' firewall, reached from the Internet by a device away from home"
+        timeout-minutes: 45
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          bash apps/daffin/scripts/ci-windows-smoke.sh away target/release 30
+
   # The Windows installer (NSIS) as scripts/windows-package.sh makes it (daffin-host beside the app), kept nowhere: it
   # passes the very check the publish guard runs on a release's installer (scripts/check-public.mjs installer, its
   # windowsInstallerErrors: its programs' URLs, no player's cores, THIRD-PARTY-LICENSES exactly licences.mjs's list for
   # Windows), never with the placeholder build.rs writes for cargo.
   windows-installer:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: windows-2025
     permissions: {}
     timeout-minutes: 90
@@ -1134,6 +1221,7 @@ jobs:
   # runner's own address, streams a stand-in game and decodes it (ci-windows-smoke.sh e2e).
   windows-smoke:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: windows-2025
     permissions: {}
     timeout-minutes: 150
@@ -1271,6 +1359,7 @@ jobs:
   # gets through and what does not, as measured on 2026-10-23. It prints its checks only.
   office-bench:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 15
@@ -1320,6 +1409,7 @@ jobs:
   # It prints its counts and checks only (report.json stays on the runner).
   away-e2e:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 90
@@ -1402,6 +1492,20 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: The host and its agent (release, OpenH264 from source)
         run: cargo build --locked --release -p daffin-host -p daffin-stream-agent --features daffin-stream-agent/bundled-openh264 --message-format=short
+      # A release host never takes an away proof's seed (crates/daffin-host/src/test_seed.rs: test builds only, daffin-0242):
+      # this job's release host, started in folders of its own with the tests' made-up seed (no run's), must refuse to
+      # start, exit 2 (a supervisor does not start it again), with the exact line, and write no link identity or device.
+      - name: A release host refuses DAFFIN_TEST_AWAY_SEED
+        run: |
+          set -uo pipefail
+          home=$(mktemp -d)
+          mkdir -m 700 "$home/run"
+          rc=0
+          HOME="$home" XDG_STATE_HOME="$home/state" XDG_CONFIG_HOME="$home/config" XDG_RUNTIME_DIR="$home/run" DAFFIN_TEST_AWAY_SEED=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8 timeout 60 target/release/daffin-host run > "$RUNNER_TEMP/seed-refused.log" 2>&1 || rc=$?
+          [ "$rc" = 2 ] || { echo "::error::a release host given DAFFIN_TEST_AWAY_SEED exited $rc, not 2"; exit 1; }
+          grep -q '^daffin-host: DAFFIN_TEST_AWAY_SEED is for test builds only: a release host does not start with it$' "$RUNNER_TEMP/seed-refused.log" || { echo "::error::a release host given DAFFIN_TEST_AWAY_SEED did not say its refusal"; exit 1; }
+          [ ! -e "$home/state/daffin/link.json" ] && [ ! -e "$home/state/daffin/devices.json" ] || { echo "::error::a release host given DAFFIN_TEST_AWAY_SEED wrote an identity or a device"; exit 1; }
+          echo "a release host refuses DAFFIN_TEST_AWAY_SEED: ok (exit 2, its line, no identity nor device written)"
       # Its account's site the bench's stand-in too (review_stand_in.py on the home network's loopback, via_host_e2e.py):
       # never the live site; the other e2e here never sign in.
       - name: The app (debug, its relay and its account's site the bench's)
@@ -1510,6 +1614,7 @@ jobs:
   # scripts' own Python tests.
   player-tools:
     needs: guard
+    if: ${{ inputs.away == '' }}
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 20
@@ -1550,7 +1655,7 @@ jobs:
   # One line per job: what the train reads (gh run view --repo moukrea/daffin <run>).
   summary:
     needs: [checks, workspace, app, android-release, android-emulator, android-clippy, player-tools, windows, windows-capture-2022, windows-installer, windows-smoke, office-bench, away-e2e]
-    if: always()
+    if: ${{ always() && inputs.away == '' }}
     runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 2
