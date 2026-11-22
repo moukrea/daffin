@@ -18,6 +18,6 @@ installer downloaded from here makes Windows' SmartScreen show « Windows a prot
 protected your PC »); « Informations complémentaires » (« More info »), then « Exécuter quand même » (« Run anyway »),
 runs it. Check its SHA-256 against the release's `SHA256SUMS` first (SECURITY.md).
 
-daffin is a preview for invited testers: there is no warranty and no support, and issues and pull requests are not
+daffin is a preview: there is no warranty and no support, and issues and pull requests are not
 accepted here. See [SECURITY.md](SECURITY.md) for the security model and for checking a download. daffin is licensed
 under the GNU Affero General Public License v3.0 only ([LICENSE](LICENSE)).
