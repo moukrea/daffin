@@ -247,6 +247,25 @@ jobs:
           sudo udevadm trigger --name-match=uinput
           sudo chmod 0666 /dev/uinput
           cargo test --locked --offline --all-features -p daffin-stream-agent --test agent --message-format=short -- --ignored --exact the_seats_are_real_pads_a_game_reads
+      # daffin-0292's two-player game on those real pads: Ubuntu's RetroArch (no picture, no sound, no window) runs a
+      # two-player core the test builds (crates/daffin-stream-agent tests/two_players_core.c: no game file, it writes down
+      # each player's presses) while the agent makes the seats' pads as a stream does, the TV's first, then the phone's:
+      # the TV's pad is player 1, the phone's player 2, each press on its own player only, and the core's rumble on
+      # player 2 comes back as seat 2's (tests/agent.rs, the_seats_are_players_one_and_two_in_retroarch). The rights of
+      # the step above. RetroArch first, as every apt step is installed (ci-apt.sh, its stderr kept out of the log).
+      - name: RetroArch (Ubuntu's)
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          if [ -f apps/daffin/scripts/ci-apt.sh ]; then . apps/daffin/scripts/ci-apt.sh; else apt_pick() { :; }; apt_try() { sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; }; apt_install() { apt_try install -yq --no-install-recommends "$@"; }; fi
+          apt_pick
+          apt_try update -q
+          apt_install retroarch
+      - name: Two players in RetroArch, on the real pads
+        run: |
+          set -euo pipefail
+          retroarch --version 2>&1 | sed -n '1,2p'
+          cargo test --locked --offline --all-features -p daffin-stream-agent --test agent --message-format=short -- --ignored --exact the_seats_are_players_one_and_two_in_retroarch
       - name: Clippy (every target and feature, warnings denied)
         if: always()
         run: cargo clippy --locked --workspace --all-targets --all-features --message-format=short -- -D warnings
