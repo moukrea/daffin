@@ -266,6 +266,32 @@ jobs:
           set -euo pipefail
           retroarch --version 2>&1 | sed -n '1,2p'
           cargo test --locked --offline --all-features -p daffin-stream-agent --test agent --message-format=short -- --ignored --exact the_seats_are_players_one_and_two_in_retroarch
+      # The same game in Flathub's RetroArch, the one the owner's Home runs (org.libretro.RetroArch, its stable branch, on
+      # its KDE runtime), in its sandbox (every device, /run/udev read-only, the host's files but not /tmp): the seats'
+      # pads, made once the game runs, reach it through udev inside the sandbox, each its own player, and the core's
+      # rumble on player 2 comes back as seat 2's. The test gives the sandbox its folder (--filesystem) and the core's
+      # log (--env); the step shows the RetroArch that ran. flatpak from Ubuntu's archive (ci-apt.sh, the lists the step
+      # above read), then Flathub's RetroArch and its runtime installed for the system; the version this run got below.
+      - name: Flathub's RetroArch (the one Home runs)
+        run: |
+          exec 2> "$RUNNER_TEMP/stderr.log"; trap 'rc=$?; [ "$rc" = 0 ] || tail -n 1 "$RUNNER_TEMP/stderr.log"; exit "$rc"' EXIT
+          set -euo pipefail
+          if [ -f apps/daffin/scripts/ci-apt.sh ]; then . apps/daffin/scripts/ci-apt.sh; else apt_try() { sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; }; apt_install() { apt_try install -yq --no-install-recommends "$@"; }; fi
+          apt_install flatpak
+          sudo flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install --system --noninteractive -y flathub org.libretro.RetroArch//stable
+          flatpak info org.libretro.RetroArch | sed -n -E '/^ *(Ref|Version|Commit|Runtime):/p'
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; Flatpak's sandbox (bwrap) makes one, as on
+      # Home (Fedora).
+      - name: User namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Two players in Flathub's RetroArch, on the real pads
+        env:
+          DAFFIN_TEST_RETROARCH: flatpak run org.libretro.RetroArch
+        run: |
+          set -euo pipefail
+          $DAFFIN_TEST_RETROARCH --version 2>&1 | sed -n '1,6p'
+          cargo test --locked --offline --all-features -p daffin-stream-agent --test agent --message-format=short -- --ignored --exact the_seats_are_players_one_and_two_in_retroarch --nocapture
       - name: Clippy (every target and feature, warnings denied)
         if: always()
         run: cargo clippy --locked --workspace --all-targets --all-features --message-format=short -- -D warnings
