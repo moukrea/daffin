@@ -1666,6 +1666,17 @@ jobs:
           fi
           grep -q 'DAFFIN_ACCOUNT_TEST_BASE is for debug builds only' "$RUNNER_TEMP/release-base.log" || { echo "::error::the release build failed, but not on its test-base check"; exit 1; }
           echo "a release host refuses DAFFIN_ACCOUNT_TEST_BASE: ok"
+      # Nor a relay dialled elsewhere than its name (crates/daffin-link/src/relay.rs RELAY_DIAL: the Sites bench's test
+      # builds, apps/daffin/scripts/sites_bench.py): built with DAFFIN_RELAY_DIAL set, it must fail on daffin-link's check.
+      - name: A release host refuses DAFFIN_RELAY_DIAL
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          if DAFFIN_RELAY_DIAL=ws://127.0.0.1:8704 cargo build --locked --release -p daffin-host --message-format=short > "$RUNNER_TEMP/release-dial.log" 2>&1; then
+            echo "::error::a release host built with DAFFIN_RELAY_DIAL set"; exit 1
+          fi
+          grep -q 'DAFFIN_RELAY_DIAL is for debug builds only' "$RUNNER_TEMP/release-dial.log" || { echo "::error::the release build failed, but not on its relay-dial check"; exit 1; }
+          echo "a release host refuses DAFFIN_RELAY_DIAL: ok"
 
   # The built-in player's tools (apps/daffin/player/tools): their tests, with fontTools, brotli and Pillow installed so that
   # the font tests run (test_pgf.py draws glyphs with Pillow: m88 run 44673422530 failed on « No module named 'PIL' »). The browser tests play games in Playwright's Chromium on emulator cores that player/build.sh builds
